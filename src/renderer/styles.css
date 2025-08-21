@@ -1,0 +1,40 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #111;
+  color: #e6e6e6;
+  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif;
+}
+#toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+}
+#stage {
+  position: relative;
+  width: 100vw;
+  height: calc(100vh - 42px);
+  overflow: hidden;
+}
+#bg, #gl {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+#hud {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  background: rgba(0,0,0,0.5);
+  padding: 6px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+#status { margin-left: auto; font-size: 12px; opacity: 0.8; }
+

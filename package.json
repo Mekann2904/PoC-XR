@@ -1,0 +1,30 @@
+{
+  "name": "poc-xr",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mekann2904/PoC-XR.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Mekann2904/PoC-XR/issues"
+  },
+  "homepage": "https://github.com/Mekann2904/PoC-XR#readme",
+  "devDependencies": {
+    "electron": "^37.3.1"
+  },
+  "dependencies": {
+    "three": "^0.168.0",
+    "electron-store": "^8.3.0"
+  }
+}

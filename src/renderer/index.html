@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PoC-XR</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="toolbar">
+      <button id="btn-open">開く</button>
+      <select id="sel-xr">
+        <option value="auto">XRモード: Auto</option>
+        <option value="xr">XR</option>
+        <option value="fb">FB</option>
+      </select>
+      <select id="sel-reso">
+        <option value="1080p">解像度: 1080p</option>
+        <option value="720p">720p</option>
+        <option value="480p">480p</option>
+      </select>
+      <select id="sel-infer">
+        <option value="30">推論: 30fps</option>
+        <option value="24">24fps</option>
+        <option value="15">15fps</option>
+      </select>
+      <select id="sel-recent">
+        <option value="">最近</option>
+      </select>
+      <span id="status"></span>
+    </div>
+
+    <div id="stage">
+      <video id="bg" autoplay playsinline muted></video>
+      <canvas id="gl"></canvas>
+      <div id="hud"></div>
+    </div>
+
+    <script src="./renderer.js" type="module"></script>
+  </body>
+  </html>
+
