@@ -138,6 +138,21 @@ app.whenReady().then(() => {
       return null;
     }
   });
+
+  // App-bundled assets safe read/exists (relative to app root)
+  const appRoot = path.resolve(path.join(__dirname, '..', '..'));
+  function resolveAppRel(rel) {
+    const safeRel = String(rel || '').replace(/\\/g, '/');
+    const target = path.resolve(path.join(appRoot, safeRel));
+    if (!target.startsWith(appRoot)) throw new Error('out of app');
+    return target;
+  }
+  ipcMain.handle('fs:exists-app', async (e, rel) => {
+    try { const p = resolveAppRel(rel); return fs.existsSync(p); } catch { return false; }
+  });
+  ipcMain.handle('fs:read-app', async (e, rel) => {
+    try { const p = resolveAppRel(rel); return fs.readFileSync(p); } catch { return null; }
+  });
 });
 
 app.on('window-all-closed', () => {

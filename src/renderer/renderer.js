@@ -703,15 +703,17 @@ state._grabbing2 = false;
 async function initHandTracking() {
   if (inferTimer) { clearInterval(inferTimer); inferTimer = null; }
   try {
-    // 動的import（未導入時は失敗→雛形で継続）
-    const mod = await import(/* @vite-ignore */ '@mediapipe/tasks-vision').catch(() => null);
-    if (!mod) throw new Error('tasks-vision未導入');
+    // 事前確認: パッケージ有無
+    const hasVision = await api.fsExistsApp('node_modules/@mediapipe/tasks-vision/vision_bundle.mjs');
+    if (!hasVision) throw new Error('tasks-vision未導入');
+    // 動的import（存在時のみ絶対URLで読み込む）
+    const visionUrl = new URL('../../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs', import.meta.url).toString();
+    const mod = await import(/* @vite-ignore */ visionUrl);
     vision = mod;
 
-    // モデルをローカルassetsから読み込み（配置前提）
-    const modelAbs = resolveRelative(window.location.pathname, 'assets/hand_landmarker.task');
-    const modelBuf = await api.fsRead(modelAbs);
-    if (!modelBuf) throw new Error('モデル未配置: assets/hand_landmarker.task');
+    // モデルをアプリ同梱assetsから読み込み（安全経路）
+    const modelBuf = await api.fsReadApp('assets/hand_landmarker.task');
+    if (!modelBuf) { if (assetHint) assetHint.hidden = false; throw new Error('モデル未配置: assets/hand_landmarker.task'); }
 
     const fileset = await vision.FilesetResolver.forVisionTasks({
       // index.html からみた相対パスで指定
@@ -730,8 +732,8 @@ async function initHandTracking() {
     const msg = String(e?.message || e);
     if (state.logLevel !== 'silent') console.info('手トラッキング未導入: ', msg);
     state._needHandModel = msg.includes('モデル未配置');
-    if (state._needHandModel) setStatus('手検出モデル未配置: assetsへ配置');
-    else setStatus('手トラッキング未導入: 雛形動作');
+    if (state._needHandModel) { setStatus('手検出モデル未配置: assetsへ配置'); if (assetHint) assetHint.hidden = false; }
+    else { setStatus('手トラッキング未導入: 雛形動作'); if (assetHint) assetHint.hidden = true; }
     handLm = null;
   }
 
