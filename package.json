@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
+    "setup": "node scripts/setup.js",
+    "bootstrap": "npm ci && npm run setup",
+    "postinstall": "node scripts/setup.js --postinstall",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
