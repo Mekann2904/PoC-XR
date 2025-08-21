@@ -8,6 +8,8 @@ const els = {
   selXR: document.getElementById('sel-xr'),
   selReso: document.getElementById('sel-reso'),
   selInfer: document.getElementById('sel-infer'),
+  selQuality: document.getElementById('sel-quality'),
+  chkPhysics: document.getElementById('chk-physics'),
   selRecent: document.getElementById('sel-recent'),
   status: document.getElementById('status'),
   video: document.getElementById('bg'),
@@ -48,7 +50,9 @@ const state = {
   inferMs: 0,
   inferCounter: 0,
   inferLastTs: performance.now(),
-  gesture: { ...defaultGesture }
+  gesture: { ...defaultGesture },
+  quality: 'medium',
+  physics: false
 };
 state.xrPlaced = false;
 
@@ -112,11 +116,46 @@ async function initThree() {
   resize();
   state.scene = new THREE.Scene();
   state.camera = new THREE.PerspectiveCamera(60, els.canvas.clientWidth / els.canvas.clientHeight, 0.01, 20);
-  const light = new THREE.HemisphereLight(0xffffff, 0x222233, 1.0);
-  state.scene.add(light);
+  state.lightHemi = new THREE.HemisphereLight(0xffffff, 0x222233, 1.0);
+  state.scene.add(state.lightHemi);
+  state.lightDir = new THREE.DirectionalLight(0xffffff, 0.6);
+  state.lightDir.position.set(2, 4, 2);
+  state.lightDir.castShadow = true;
+  state.lightDir.shadow.mapSize.set(1024, 1024);
+  state.scene.add(state.lightDir);
+  state.ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 20),
+    new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.25 })
+  );
+  state.ground.rotation.x = -Math.PI / 2;
+  state.ground.receiveShadow = true;
+  state.scene.add(state.ground);
   // モデルの親（XRアンカー/FB位置を集約）
   state.modelRoot = new THREE.Group();
   state.scene.add(state.modelRoot);
+}
+
+function applyQualityPreset() {
+  const q = state.quality || 'medium';
+  if (!state.renderer) return;
+  if (q === 'low') {
+    state.renderer.shadowMap.enabled = false;
+    state.lightDir.intensity = 0.5;
+    state.lightHemi.intensity = 0.8;
+    state.ground.visible = false;
+  } else if (q === 'high') {
+    state.renderer.shadowMap.enabled = true;
+    state.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    state.lightDir.intensity = 1.0;
+    state.lightHemi.intensity = 1.0;
+    state.ground.visible = true;
+  } else {
+    state.renderer.shadowMap.enabled = true;
+    state.lightDir.intensity = 0.7;
+    state.lightHemi.intensity = 0.9;
+    state.ground.visible = true;
+  }
+  if (state.model) { state.model.traverse(o => { if (o.isMesh) o.castShadow = (q !== 'low'); }); }
 }
 
 function resize() {
@@ -133,6 +172,16 @@ function tick(ts) {
   const dt = ts - state.lastFrameTs;
   state.lastFrameTs = ts;
   state.fps = 1000 / Math.max(1, dt);
+
+  // 物理ステップ（FB時）
+  if (!state.xrSession && phys.enabled && phys.world) {
+    phys.world.step(1/60);
+    if (phys.body && !state._grabbing) {
+      const b = phys.body.position; state.modelRoot.position.set(b.x, b.y, b.z);
+    } else if (phys.body && state._grabbing) {
+      const p = state.modelRoot.position; phys.body.position.set(p.x, p.y, p.z); phys.body.velocity.set(0,0,0);
+    }
+  }
 
   if (!state.xrSession && state.renderer && state.scene && state.camera) {
     state.renderer.render(state.scene, state.camera);
@@ -180,6 +229,16 @@ function bindEvents() {
   els.selInfer.addEventListener('change', async (e) => {
     state.inferFps = Number(e.target.value);
     await api.setStore({ settings: { ...(await api.getStore('settings')), inferFps: state.inferFps } });
+  });
+  els.selQuality.addEventListener('change', async (e) => {
+    state.quality = e.target.value;
+    applyQualityPreset();
+    await api.setStore({ settings: { ...(await api.getStore('settings')), quality: state.quality } });
+  });
+  els.chkPhysics.addEventListener('change', async (e) => {
+    state.physics = !!e.target.checked;
+    await ensurePhysics();
+    await api.setStore({ settings: { ...(await api.getStore('settings')), physics: state.physics } });
   });
   els.selRecent.addEventListener('change', async (e) => {
     const v = decodeURIComponent(e.target.value || '');
@@ -255,11 +314,12 @@ function bindEvents() {
     calibStatus.textContent = calibActive ? '計測中: ピンチ→離すを繰り返す' : '完了';
     btnCalib.textContent = calibActive ? '停止' : 'キャリブレーション開始';
     if (!calibActive) {
-      if (isFinite(calibMin) && calibMax > 0) {
-        const grab = calibMin + (calibMax - calibMin) * 0.20;
-        const rel = calibMin + (calibMax - calibMin) * 0.35;
+      if (isFinite(calibMin) && calibMax > calibMin) {
+        const range = calibMax - calibMin;
+        const grab = calibMin + range * 0.25; // 25% from the tightest pinch
+        const rel = grab + Math.max(0.01, range * 0.2); // Hysteresis is 20% of range, or a minimum of 0.01
         state.gesture.T_grab = Math.max(0.005, Math.min(0.12, grab));
-        state.gesture.T_release = Math.max(state.gesture.T_grab + 0.002, Math.min(0.15, rel));
+        state.gesture.T_release = Math.max(state.gesture.T_grab + 0.005, Math.min(0.15, rel));
         syncInputs();
       }
     }
@@ -308,10 +368,14 @@ async function restoreSettings() {
   if (s.xrMode) state.xrMode = s.xrMode;
   if (s.resolution) state.resolution = s.resolution;
   if (s.inferFps) state.inferFps = s.inferFps;
+  if (s.quality) state.quality = s.quality;
+  if (typeof s.physics === 'boolean') state.physics = s.physics;
   if (s.gesture) state.gesture = { ...defaultGesture, ...s.gesture };
   els.selXR.value = state.xrMode;
   els.selReso.value = state.resolution;
   els.selInfer.value = String(state.inferFps);
+  els.selQuality.value = state.quality;
+  els.chkPhysics.checked = state.physics;
 }
 
 async function main() {
@@ -320,8 +384,10 @@ async function main() {
   await detectXR();
   await startCamera();
   await initThree();
+  applyQualityPreset();
   await refreshRecents();
   await initHandTracking();
+  await ensurePhysics();
   await ensureModeLoop();
 }
 
@@ -410,6 +476,8 @@ async function loadPMX(pmxAbsPath) {
     autoPlace(mesh);
     state.modelRoot.add(mesh);
     state.model = mesh;
+    applyQualityPreset();
+    if (state.physics) { await ensurePhysics(); updatePhysicsBodyFromModel(); }
     setStatus('PMX読み込み完了');
     hideModal();
   } catch (e) {
@@ -455,6 +523,48 @@ class OneEuroFilter { constructor(minCutoff, beta, dCutoff) { this.minCutoff = m
   alpha(dt, cutoff) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
   filter(x, dt) { if (dt <= 0) return x; const dx = this.last == null ? 0 : (x - this.last) / dt; const edx = this.dxFilt.filter(dx, this.alpha(dt, this.dCutoff)); const cutoff = this.minCutoff + this.beta * Math.abs(edx); const res = this.xFilt.filter(x, this.alpha(dt, cutoff)); this.last = res; return res; } }
 let onePosX = null, onePosY = null, onePosZ = null, oneYaw = null;
+
+// --- 物理（cannon-es） ---
+const phys = { enabled: false, world: null, body: null, floor: null, last: 0, cannon: null };
+async function ensurePhysics() {
+  phys.enabled = !!state.physics;
+  if (!phys.enabled) { if (phys.world) { /* keep for reuse */ } return; }
+  if (!phys.cannon) {
+    try {
+      phys.cannon = await import('cannon-es');
+    } catch (e) {
+      setStatus('物理モジュール未導入');
+      state.physics = false; els.chkPhysics.checked = false; return;
+    }
+  }
+  if (!phys.world) {
+    const C = phys.cannon;
+    phys.world = new C.World({ gravity: new C.Vec3(0, -9.82, 0) });
+    // 床
+    phys.floor = new C.Body({ mass: 0, shape: new C.Plane() });
+    phys.floor.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+    phys.world.addBody(phys.floor);
+  }
+  // モデル剛体用意
+  if (state.model && !phys.body) updatePhysicsBodyFromModel();
+}
+
+function updatePhysicsBodyFromModel() {
+  if (!phys.enabled || !state.model) return;
+  const C = phys.cannon; if (!C) return;
+  // AABBから近似ボックス作成
+  const box = new THREE.Box3().setFromObject(state.model);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const half = new C.Vec3(Math.max(0.05, size.x/2), Math.max(0.05, size.y/2), Math.max(0.05, size.z/2));
+  const shape = new C.Box(half);
+  if (!phys.body) {
+    phys.body = new C.Body({ mass: 1 });
+    phys.world.addBody(phys.body);
+  }
+  phys.body.shapes = []; phys.body.addShape(shape);
+  const p = state.modelRoot.position;
+  phys.body.position.set(p.x, p.y || (half.y + 0.01), p.z);
+}
 let pinchBaseline = null;
 let yawPrev = null;
 state._grabbing = false;
@@ -653,6 +763,16 @@ async function startXR() {
         if (pose) {
           state.modelRoot.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
           const o = pose.transform.orientation; state.modelRoot.quaternion.set(o.x, o.y, o.z, o.w);
+        }
+      }
+
+      // 物理ステップ（XR時）
+      if (phys.enabled && phys.world) {
+        phys.world.step(1/60);
+        if (phys.body && !state._grabbing) {
+          const b = phys.body.position; state.modelRoot.position.set(b.x, b.y, b.z);
+        } else if (phys.body && state._grabbing) {
+          const p = state.modelRoot.position; phys.body.position.set(p.x, p.y, p.z); phys.body.velocity.set(0,0,0);
         }
       }
 
