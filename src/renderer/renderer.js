@@ -733,9 +733,10 @@ async function initHandTracking() {
     const modelBuf = await api.fsReadApp('assets/hand_landmarker.task');
     if (!modelBuf) { if (assetHint) assetHint.hidden = false; throw new Error('モデル未配置: assets/hand_landmarker.task'); }
 
-    // file://のfetch制限を避けるため、WASMローダ/バイナリをBlob URLに変換
-    const wasmLoaderUrl = await toBlobURLApp('node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js', 'text/javascript');
-    const wasmBinaryUrl = await toBlobURLApp('node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm', 'application/wasm');
+    // 絶対file://URLに解決（CSPでworker-src 'self'許可済み）
+    const baseHref = window.location.href;
+    const wasmLoaderUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js', baseHref).toString();
+    const wasmBinaryUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm', baseHref).toString();
     const fileset = await vision.FilesetResolver.forVisionTasks({
       wasmLoaderPath: wasmLoaderUrl,
       wasmBinaryPath: wasmBinaryUrl
