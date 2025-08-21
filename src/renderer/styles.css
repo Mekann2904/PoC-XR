@@ -38,6 +38,18 @@ html, body {
   font-size: 12px;
   border-radius: 6px;
 }
+#asset-hint {
+  position: absolute;
+  left: 50%;
+  top: 52px;
+  transform: translateX(-50%);
+  background: rgba(255, 87, 34, 0.85);
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  z-index: 10;
+}
 #status { margin-left: auto; font-size: 12px; opacity: 0.8; }
 #xr-hint {
   position: absolute;

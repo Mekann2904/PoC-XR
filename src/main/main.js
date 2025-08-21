@@ -54,6 +54,17 @@ function createWindow() {
   win.removeMenu();
   win.loadFile(path.join(__dirname, '../renderer/index.html'));
 
+  // 追加の安全設定とログ
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (e) => { e.preventDefault(); });
+  win.webContents.on('did-fail-load', (e, errorCode, errorDesc, validatedURL) => {
+    console.error('did-fail-load', { errorCode, errorDesc, validatedURL });
+  });
+  win.webContents.on('console-message', (e, level, message, line, sourceId) => {
+    const lvl = ['log','warn','error'][Math.min(2, Math.max(0, level-1))] || 'log';
+    console[lvl](`[renderer:${lvl}]`, message, `(${sourceId}:${line})`);
+  });
+
   return win;
 }
 
