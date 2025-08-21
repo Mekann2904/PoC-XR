@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   getStore: (key) => ipcRenderer.invoke('store:get', key),
   setStore: (partial) => ipcRenderer.invoke('store:set', partial),
   listRecents: () => ipcRenderer.invoke('recent:list'),
-  addRecent: (path) => ipcRenderer.invoke('recent:add', path)
+  addRecent: (path) => ipcRenderer.invoke('recent:add', path),
+  setBaseDir: (dir) => ipcRenderer.invoke('fs:set-base', dir),
+  fsRead: (absPath) => ipcRenderer.invoke('fs:read', absPath)
 });
-
