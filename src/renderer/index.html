@@ -36,6 +36,7 @@
         <option value="">最近</option>
       </select>
       <button id="btn-replace" title="XR再配置">再配置</button>
+      <button id="btn-gest" title="ジェスチャー調整">調整</button>
       <span id="status"></span>
     </div>
 
@@ -50,6 +51,55 @@
           <div id="modal-msg">初期化中</div>
           <div class="bar"><div id="bar-inner"></div></div>
           <div id="modal-errors"></div>
+        </div>
+      </div>
+
+      <div id="gest-panel" hidden>
+        <div class="panel">
+          <div class="title">ジェスチャー調整</div>
+          <div class="row">
+            <label>しきい値 T_grab: <span id="val-tgrab"></span></label>
+            <input id="in-tgrab" type="range" min="0.010" max="0.120" step="0.001">
+          </div>
+          <div class="row">
+            <label>しきい値 T_release: <span id="val-trel"></span></label>
+            <input id="in-trel" type="range" min="0.015" max="0.150" step="0.001">
+          </div>
+          <div class="row">
+            <label>フィルタ: </label>
+            <select id="in-filter">
+              <option value="ema">EMA</option>
+              <option value="oneeuro">OneEuro</option>
+            </select>
+          </div>
+          <div class="row ema-only">
+            <label>位置EMA α: <span id="val-posa"></span></label>
+            <input id="in-posa" type="range" min="0.05" max="1.00" step="0.05">
+          </div>
+          <div class="row ema-only">
+            <label>角度EMA α: <span id="val-rota"></span></label>
+            <input id="in-rota" type="range" min="0.05" max="1.00" step="0.05">
+          </div>
+          <div class="row oneeuro-only">
+            <label>minCutoff: <span id="val-minc"></span></label>
+            <input id="in-minc" type="range" min="0.10" max="5.00" step="0.10">
+          </div>
+          <div class="row oneeuro-only">
+            <label>beta: <span id="val-beta"></span></label>
+            <input id="in-beta" type="range" min="0.00" max="1.00" step="0.05">
+          </div>
+          <div class="row oneeuro-only">
+            <label>dCutoff: <span id="val-dc"></span></label>
+            <input id="in-dc" type="range" min="0.10" max="5.00" step="0.10">
+          </div>
+          <div class="row">
+            <button id="btn-calib">キャリブレーション開始</button>
+            <span id="calib-status"></span>
+          </div>
+          <div class="row end">
+            <button id="btn-gest-save">保存</button>
+            <button id="btn-gest-close">閉じる</button>
+          </div>
         </div>
       </div>
     </div>

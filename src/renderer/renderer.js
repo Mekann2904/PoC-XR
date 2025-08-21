@@ -22,6 +22,17 @@ const modal = {
 };
 const xrHint = document.getElementById('xr-hint');
 
+const defaultGesture = {
+  T_grab: 0.035,
+  T_release: 0.045,
+  filter: 'ema',
+  posAlpha: 0.5,
+  rotAlpha: 0.7,
+  minCutoff: 1.0,
+  beta: 0.3,
+  dCutoff: 1.0
+};
+
 const state = {
   xrMode: 'auto', // auto | xr | fb
   resolution: '1080p',
@@ -35,7 +46,8 @@ const state = {
   fps: 0,
   inferMs: 0,
   inferCounter: 0,
-  inferLastTs: performance.now()
+  inferLastTs: performance.now(),
+  gesture: { ...defaultGesture }
 };
 state.xrPlaced = false;
 
@@ -177,6 +189,88 @@ function bindEvents() {
     await loadPMX(v);
   });
   window.addEventListener('resize', resize);
+
+  // ジェスチャー調整UI
+  const btnGest = document.getElementById('btn-gest');
+  const panel = document.getElementById('gest-panel');
+  const btnClose = document.getElementById('btn-gest-close');
+  const btnSave = document.getElementById('btn-gest-save');
+  const selFilter = document.getElementById('in-filter');
+  const inTg = document.getElementById('in-tgrab');
+  const inTr = document.getElementById('in-trel');
+  const inPa = document.getElementById('in-posa');
+  const inRa = document.getElementById('in-rota');
+  const inMin = document.getElementById('in-minc');
+  const inBe = document.getElementById('in-beta');
+  const inDc = document.getElementById('in-dc');
+  const valTg = document.getElementById('val-tgrab');
+  const valTr = document.getElementById('val-trel');
+  const valPa = document.getElementById('val-posa');
+  const valRa = document.getElementById('val-rota');
+  const valMin = document.getElementById('val-minc');
+  const valBe = document.getElementById('val-beta');
+  const valDc = document.getElementById('val-dc');
+  const btnCalib = document.getElementById('btn-calib');
+  const calibStatus = document.getElementById('calib-status');
+
+  function syncFilterVisibility() {
+    const isOne = selFilter.value === 'oneeuro';
+    document.querySelectorAll('.ema-only').forEach(e => e.style.display = isOne ? 'none' : 'grid');
+    document.querySelectorAll('.oneeuro-only').forEach(e => e.style.display = isOne ? 'grid' : 'none');
+  }
+  function syncInputs() {
+    const g = state.gesture;
+    selFilter.value = g.filter;
+    inTg.value = g.T_grab; valTg.textContent = Number(g.T_grab).toFixed(3);
+    inTr.value = g.T_release; valTr.textContent = Number(g.T_release).toFixed(3);
+    inPa.value = g.posAlpha; valPa.textContent = Number(g.posAlpha).toFixed(2);
+    inRa.value = g.rotAlpha; valRa.textContent = Number(g.rotAlpha).toFixed(2);
+    inMin.value = g.minCutoff; valMin.textContent = Number(g.minCutoff).toFixed(2);
+    inBe.value = g.beta; valBe.textContent = Number(g.beta).toFixed(2);
+    inDc.value = g.dCutoff; valDc.textContent = Number(g.dCutoff).toFixed(2);
+    syncFilterVisibility();
+  }
+  btnGest?.addEventListener('click', () => { panel.hidden = false; syncInputs(); });
+  btnClose?.addEventListener('click', () => { panel.hidden = true; });
+  btnSave?.addEventListener('click', async () => {
+    await api.setStore({ settings: { ...(await api.getStore('settings')), gesture: state.gesture } });
+    panel.hidden = true; setStatus('ジェスチャー設定を保存');
+  });
+  selFilter.addEventListener('change', () => { state.gesture.filter = selFilter.value; syncFilterVisibility(); });
+  inTg.addEventListener('input', () => { state.gesture.T_grab = Number(inTg.value); valTg.textContent = Number(inTg.value).toFixed(3); });
+  inTr.addEventListener('input', () => { state.gesture.T_release = Number(inTr.value); valTr.textContent = Number(inTr.value).toFixed(3); });
+  inPa.addEventListener('input', () => { state.gesture.posAlpha = Number(inPa.value); valPa.textContent = Number(inPa.value).toFixed(2); });
+  inRa.addEventListener('input', () => { state.gesture.rotAlpha = Number(inRa.value); valRa.textContent = Number(inRa.value).toFixed(2); });
+  inMin.addEventListener('input', () => { state.gesture.minCutoff = Number(inMin.value); valMin.textContent = Number(inMin.value).toFixed(2); });
+  inBe.addEventListener('input', () => { state.gesture.beta = Number(inBe.value); valBe.textContent = Number(inBe.value).toFixed(2); });
+  inDc.addEventListener('input', () => { state.gesture.dCutoff = Number(inDc.value); valDc.textContent = Number(inDc.value).toFixed(2); });
+
+  // キャリブレーション
+  let calibActive = false;
+  let calibMin = Infinity, calibMax = 0;
+  btnCalib.addEventListener('click', () => {
+    calibActive = !calibActive;
+    calibMin = Infinity; calibMax = 0;
+    calibStatus.textContent = calibActive ? '計測中: ピンチ→離すを繰り返す' : '完了';
+    btnCalib.textContent = calibActive ? '停止' : 'キャリブレーション開始';
+    if (!calibActive) {
+      if (isFinite(calibMin) && calibMax > 0) {
+        const grab = calibMin + (calibMax - calibMin) * 0.20;
+        const rel = calibMin + (calibMax - calibMin) * 0.35;
+        state.gesture.T_grab = Math.max(0.005, Math.min(0.12, grab));
+        state.gesture.T_release = Math.max(state.gesture.T_grab + 0.002, Math.min(0.15, rel));
+        syncInputs();
+      }
+    }
+  });
+
+  // サンプル更新（推論ループから更新）
+  state._calibUpdate = (dist) => {
+    if (!calibActive) return;
+    calibMin = Math.min(calibMin, dist);
+    calibMax = Math.max(calibMax, dist);
+    calibStatus.textContent = `min=${calibMin.toFixed(3)} max=${calibMax.toFixed(3)}`;
+  };
 }
 
 async function restoreSettings() {
@@ -184,6 +278,7 @@ async function restoreSettings() {
   if (s.xrMode) state.xrMode = s.xrMode;
   if (s.resolution) state.resolution = s.resolution;
   if (s.inferFps) state.inferFps = s.inferFps;
+  if (s.gesture) state.gesture = { ...defaultGesture, ...s.gesture };
   els.selXR.value = state.xrMode;
   els.selReso.value = state.resolution;
   els.selInfer.value = String(state.inferFps);
@@ -322,9 +417,14 @@ function placeholderDataURL() {
 let inferTimer = null;
 let handLm = null;
 let vision = null;
-// 平滑化（EMA）・状態
+// 平滑化（EMA/OneEuro）・状態
 const smooth = { posAlpha: 0.5, rotAlpha: 0.7 };
 const filt = { pos: new THREE.Vector3(), rotY: 0, scale: 1 };
+class LowPassFilter { constructor() { this.y = null; } filter(x, alpha) { if (this.y == null) this.y = x; this.y = alpha * x + (1 - alpha) * this.y; return this.y; } }
+class OneEuroFilter { constructor(minCutoff, beta, dCutoff) { this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff; this.xFilt = new LowPassFilter(); this.dxFilt = new LowPassFilter(); this.last = null; }
+  alpha(dt, cutoff) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
+  filter(x, dt) { if (dt <= 0) return x; const dx = this.last == null ? 0 : (x - this.last) / dt; const edx = this.dxFilt.filter(dx, this.alpha(dt, this.dCutoff)); const cutoff = this.minCutoff + this.beta * Math.abs(edx); const res = this.xFilt.filter(x, this.alpha(dt, cutoff)); this.last = res; return res; } }
+let onePosX = null, onePosY = null, onePosZ = null, oneYaw = null;
 let pinchBaseline = null;
 let yawPrev = null;
 state._grabbing = false;
@@ -372,6 +472,7 @@ async function initHandTracking() {
     }
     const t1 = performance.now();
     state.inferMs = t1 - t0;
+    state.inferLastTs = t1;
   }, period);
 }
 
@@ -380,17 +481,19 @@ function updateFromHands(result) {
   const hands = result?.landmarks || [];
   const h0 = hands[0];
   const h1 = hands[1];
-  const T_grab = 0.035, T_release = 0.045;
+  const T_grab = state.gesture.T_grab, T_release = state.gesture.T_release;
 
   if (h0) {
     const d0 = pinchDistance(h0);
     state._grabbing = state._grabbing ? (d0 < T_release) : (d0 < T_grab);
+    if (typeof state._calibUpdate === 'function') state._calibUpdate(d0);
   } else {
     state._grabbing = false;
   }
   if (h1) {
     const d1 = pinchDistance(h1);
     state._grabbing2 = state._grabbing2 ? (d1 < T_release) : (d1 < T_grab);
+    if (typeof state._calibUpdate === 'function') state._calibUpdate(d1);
   } else {
     state._grabbing2 = false;
   }
@@ -400,13 +503,28 @@ function updateFromHands(result) {
     const c = handCenter(h0);
     const yaw = handYaw(h0);
     const pt = screenToWorld(c.x, c.y, 0);
+    const dt = Math.max(1e-3, state.inferMs / 1000);
     if (pt) {
-      filt.pos.lerp(pt, smooth.posAlpha);
+      if (state.gesture.filter === 'oneeuro') {
+        onePosX ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+        onePosY ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+        onePosZ ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+        const x = onePosX.filter(pt.x, dt), y = onePosY.filter(pt.y, dt), z = onePosZ.filter(pt.z, dt);
+        filt.pos.set(x, y, z);
+      } else {
+        filt.pos.lerp(pt, state.gesture.posAlpha);
+      }
       state.modelRoot.position.copy(filt.pos);
     }
     if (isFinite(yaw)) {
-      if (yawPrev == null) yawPrev = yaw;
-      filt.rotY = lerpAngle(filt.rotY, yaw, smooth.rotAlpha);
+      if (state.gesture.filter === 'oneeuro') {
+        oneYaw ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+        const y = oneYaw.filter(yaw, dt);
+        filt.rotY = y;
+      } else {
+        if (yawPrev == null) yawPrev = yaw;
+        filt.rotY = lerpAngle(filt.rotY, yaw, state.gesture.rotAlpha);
+      }
       state.modelRoot.rotation.y = filt.rotY;
     }
   } else {
@@ -419,7 +537,7 @@ function updateFromHands(result) {
     const dist = Math.hypot(c0.x - c1.x, c0.y - c1.y);
     if (pinchBaseline == null) pinchBaseline = dist;
     const target = Math.max(0.2, Math.min(5.0, 1.0 * (dist / Math.max(1e-5, pinchBaseline))));
-    filt.scale = filt.scale + (target - filt.scale) * smooth.posAlpha;
+    filt.scale = filt.scale + (target - filt.scale) * (state.gesture.filter === 'oneeuro' ? 0.3 : state.gesture.posAlpha);
     state.model.scale.setScalar(filt.scale);
   } else {
     pinchBaseline = null;
