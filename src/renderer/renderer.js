@@ -25,6 +25,7 @@ const modal = {
 };
 const xrHint = document.getElementById('xr-hint');
 const dropHint = document.getElementById('drop-hint');
+const assetHint = document.getElementById('asset-hint');
 
 const defaultGesture = {
   T_grab: 0.035,
@@ -77,6 +78,7 @@ function hudRender() {
     (state._grabbing ? 'grab: ON' : 'grab: OFF');
   // XRヒント表示
   xrHint.hidden = !(state.xrSession && !state.xrPlaced);
+  if (assetHint) assetHint.hidden = !state._needHandModel;
 }
 
 async function detectXR() {
@@ -723,7 +725,12 @@ async function initHandTracking() {
       numHands: 2
     });
   } catch (e) {
-    console.warn('HandLandmarker初期化スキップ:', e?.message || e);
+    // 未導入時は情報メッセージに留め、FBジェスチャ骨格のみ継続
+    const msg = String(e?.message || e);
+    if (state.logLevel !== 'silent') console.info('手トラッキング未導入: ', msg);
+    state._needHandModel = msg.includes('モデル未配置');
+    if (state._needHandModel) setStatus('手検出モデル未配置: assetsへ配置');
+    else setStatus('手トラッキング未導入: 雛形動作');
     handLm = null;
   }
 
@@ -852,12 +859,27 @@ state.xrAnchor = null;
 state.reticle = null;
 
 async function ensureModeLoop() {
-  if (state.xrMode === 'xr' || (state.xrMode === 'auto' && state.hasXR)) {
+  // XR強制指定時に未対応なら即FB固定
+  if (state.xrMode === 'xr') {
+    if (!state.hasXR) {
+      setStatus('XR未対応: Fallbackへ固定');
+      state.xrMode = 'fb';
+      try { els.selXR.value = 'fb'; } catch {}
+      stopXR();
+      requestAnimationFrame(tick);
+      return;
+    }
     await startXR();
-  } else {
-    stopXR();
-    requestAnimationFrame(tick);
+    return;
   }
+  // Autoかつ対応時のみXR開始
+  if (state.xrMode === 'auto' && state.hasXR) {
+    await startXR();
+    return;
+  }
+  // それ以外はFB描画
+  stopXR();
+  requestAnimationFrame(tick);
 }
 
 function stopXR() {
@@ -871,6 +893,11 @@ function stopXR() {
 async function startXR() {
   if (!navigator.xr) { requestAnimationFrame(tick); return; }
   try {
+    // 事前対応確認（未対応なら静かにFBへ）
+    if (navigator.xr.isSessionSupported) {
+      const ok = await navigator.xr.isSessionSupported('immersive-ar');
+      if (!ok) { setStatus('XR未対応: Fallbackへ切替'); stopXR(); requestAnimationFrame(tick); return; }
+    }
     const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hit-test'] });
     state.xrSession = session;
     state.renderer.xr.enabled = true;
