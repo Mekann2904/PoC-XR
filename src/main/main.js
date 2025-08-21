@@ -109,7 +109,7 @@ app.whenReady().then(() => {
   let allowedBaseDir = null;
   ipcMain.handle('fs:set-base', async (e, baseDir) => {
     try {
-      const norm = path.resolve(baseDir || '');
+      const norm = fs.realpathSync(path.resolve(baseDir || ''));
       if (!fs.existsSync(norm) || !fs.statSync(norm).isDirectory()) return false;
       allowedBaseDir = norm;
       return true;
@@ -119,7 +119,7 @@ app.whenReady().then(() => {
   ipcMain.handle('fs:read', async (e, absPath) => {
     try {
       if (!allowedBaseDir) throw new Error('base not set');
-      const norm = path.resolve(absPath);
+      const norm = fs.realpathSync(path.resolve(absPath));
       if (!norm.startsWith(allowedBaseDir)) throw new Error('out of base');
       return fs.readFileSync(norm);
     } catch (err) {

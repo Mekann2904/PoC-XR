@@ -14,6 +14,12 @@ const els = {
   canvas: document.getElementById('gl'),
   hud: document.getElementById('hud')
 };
+const modal = {
+  root: document.getElementById('modal'),
+  msg: document.getElementById('modal-msg'),
+  bar: document.getElementById('bar-inner'),
+  errors: document.getElementById('modal-errors')
+};
 
 const state = {
   xrMode: 'auto', // auto | xr | fb
@@ -32,6 +38,10 @@ const state = {
 };
 
 function setStatus(msg) { els.status.textContent = msg; }
+function showModal(msg) { modal.root.hidden = false; modal.msg.textContent = msg; modal.errors.textContent = ''; modal.bar.style.width = '0%'; }
+function hideModal() { modal.root.hidden = true; }
+function setProgress(p, msg) { modal.bar.style.width = `${Math.max(0, Math.min(100, p))}%`; if (msg) modal.msg.textContent = msg; }
+function pushError(e) { modal.errors.textContent += (modal.errors.textContent ? '\n' : '') + e; }
 
 function hudRender() {
   els.hud.innerText = `fps: ${state.fps.toFixed(0)}\n` +
@@ -189,6 +199,7 @@ async function toBlobURL(absPath, mime = 'application/octet-stream') {
 
 function resolveRelative(baseAbs, rel) {
   // 簡易解決（Electron側でベース外は拒否）
+  rel = rel.replace(/\\/g, '/');
   const parts = baseAbs.split('/');
   parts.pop();
   const baseDir = parts.join('/');
@@ -202,6 +213,15 @@ function resolveRelative(baseAbs, rel) {
 
 async function loadPMX(pmxAbsPath) {
   try {
+    // 事前検証: 拡張子/サイズ上限
+    if (!pmxAbsPath.toLowerCase().endsWith('.pmx')) {
+      pushError('非対応拡張子'); return;
+    }
+    const pmxBuf = await api.fsRead(pmxAbsPath);
+    if (!pmxBuf) { pushError('PMXファイル読込失敗'); return; }
+    const sizeMB = (pmxBuf.byteLength || pmxBuf.length || 0) / (1024*1024);
+    if (sizeMB > 200) { pushError('サイズ上限超過: ' + sizeMB.toFixed(1) + 'MB'); return; }
+
     // URL変換: 依存テクスチャ等をblob:に差し替え
     const manager = new THREE.LoadingManager();
     manager.setURLModifier((url) => {
@@ -213,21 +233,19 @@ async function loadPMX(pmxAbsPath) {
         // 画像系MIMEは簡易推定
         const ext = abs.split('.').pop()?.toLowerCase();
         const mime = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'application/octet-stream';
-        // 事前に非同期変換したいが、URLModifierは同期。既知パスはキャッシュ利用前提。
-        // 未キャッシュの場合は一旦プレースホルダを返し、事後差し替え（簡易: 必要時生成）。
+        // 事前非同期変換は不可のため、キャッシュ未命中ならプレースホルダを返し、裏で変換
         const cached = blobCache.get(abs);
         if (cached) return cached;
-        // 同期で返す必要があるため、暫定的にdata:空を返す（テクスチャは遅延ロードで再試行されることが多い）
-        // 後続で明示読み込みを試みる
-        toBlobURL(abs, mime).catch(() => {});
-        return 'data:application/octet-stream;base64,';
+        toBlobURL(abs, mime).catch(() => pushError('依存読み込み失敗: ' + abs));
+        return (mime.startsWith('image/')) ? placeholderDataURL() : 'data:application/octet-stream;base64,';
       } catch {
         return url;
       }
     });
 
     const loader = new MMDLoader(manager);
-    const pmxURL = await toBlobURL(pmxAbsPath, 'model/pmx');
+    showModal('PMX読み込み開始');
+    const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'model/pmx' }));
 
     // 既存モデルをクリア
     for (let i = state.scene.children.length - 1; i >= 0; i--) {
@@ -237,15 +255,25 @@ async function loadPMX(pmxAbsPath) {
 
     setStatus('PMX読み込み中');
     const mesh = await new Promise((resolve, reject) => {
-      loader.load(pmxURL, resolve, (e) => setStatus(`読込 ${Math.round((e.loaded||0)/(e.total||1)*100)}%`), reject);
+      loader.load(pmxURL, resolve, (e) => {
+        const p = Math.round((e.loaded||0)/(e.total||1)*100);
+        setStatus(`読込 ${p}%`);
+        setProgress(p, `アセット読み込み ${p}%`);
+      }, (err) => {
+        pushError('PMX読込エラー'); reject(err);
+      });
     });
     mesh.userData.tag = 'pmx';
     autoPlace(mesh);
     state.scene.add(mesh);
+    state.model = mesh;
     setStatus('PMX読み込み完了');
+    hideModal();
   } catch (e) {
     console.error(e);
     setStatus('PMX読み込み失敗');
+    showModal('読み込み失敗');
+    pushError(String(e?.message || e));
   }
 }
 
@@ -263,16 +291,90 @@ function autoPlace(obj) {
   obj.position.set(0, 0, 0);
 }
 
+function placeholderDataURL() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 2;
+  const g = c.getContext('2d');
+  g.fillStyle = '#777'; g.fillRect(0,0,2,2);
+  g.fillStyle = '#999'; g.fillRect(0,0,1,1); g.fillRect(1,1,1,1);
+  return c.toDataURL('image/png');
+}
+
 // --- MediaPipe Hand Landmarker 雛形 ---
 let inferTimer = null;
+let handLm = null;
+let vision = null;
 async function initHandTracking() {
-  // 依存未導入のため雛形のみ。導入時に初期化。
-  if (inferTimer) clearInterval(inferTimer);
+  if (inferTimer) { clearInterval(inferTimer); inferTimer = null; }
+  try {
+    // 動的import（未導入時は失敗→雛形で継続）
+    const mod = await import(/* @vite-ignore */ '@mediapipe/tasks-vision').catch(() => null);
+    if (!mod) throw new Error('tasks-vision未導入');
+    vision = mod;
+
+    // モデルをローカルassetsから読み込み（配置前提）
+    const modelAbs = resolveRelative(window.location.pathname, 'assets/hand_landmarker.task');
+    const modelBuf = await api.fsRead(modelAbs);
+    if (!modelBuf) throw new Error('モデル未配置: assets/hand_landmarker.task');
+
+    const fileset = await vision.FilesetResolver.forVisionTasks({
+      wasmLoaderPath: 'node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js',
+      wasmBinaryPath: 'node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm'
+    });
+    handLm = await vision.HandLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetBuffer: new Uint8Array(modelBuf)
+      },
+      runningMode: 'VIDEO',
+      numHands: 2
+    });
+  } catch (e) {
+    console.warn('HandLandmarker初期化スキップ:', e?.message || e);
+    handLm = null;
+  }
+
+  // 推論ループ（導入済みなら実推論、未導入ならメトリクスのみ更新）
+  const period = Math.max(1, Math.round(1000 / Math.max(1, state.inferFps)));
   inferTimer = setInterval(() => {
     const t0 = performance.now();
-    // TODO: Hand Landmarker推論をここで実施
-    // state.video からフレームを入力し、ランドマークに応じて操作を更新
+    if (handLm && els.video.readyState >= 2) {
+      try {
+        const res = handLm.detectForVideo(els.video, performance.now());
+        updateFromHands(res);
+      } catch (e) {
+        // 推論失敗は継続
+      }
+    }
     const t1 = performance.now();
     state.inferMs = t1 - t0;
-  }, Math.max(1, Math.round(1000 / Math.max(1, state.inferFps))));
+  }, period);
+}
+
+function updateFromHands(result) {
+  // 簡易マッピング（Fallback層想定）: 片手ピンチで掴み、位置をZ=0平面へ投影
+  const lm = (result?.landmarks && result.landmarks[0]) || null;
+  if (!lm || !state.model) return;
+  const thumb = lm[4], index = lm[8];
+  const dx = (thumb.x - index.x), dy = (thumb.y - index.y);
+  const dist = Math.hypot(dx, dy);
+  const T_grab = 0.035, T_release = 0.045;
+  state._grabbing = state._grabbing ? (dist < T_release) : (dist < T_grab);
+  if (!state._grabbing) return;
+  const cx = (lm[0].x + lm[5].x + lm[17].x) / 3;
+  const cy = (lm[0].y + lm[5].y + lm[17].y) / 3;
+  const pt = screenToWorld(cx, cy, 0);
+  if (pt) state.model.position.copy(pt);
+}
+
+const _raycaster = new THREE.Raycaster();
+function screenToWorld(nx, ny, zPlane = 0) {
+  // nx, ny: 0..1（左上原点）→ NDCへ
+  const x = nx * 2 - 1;
+  const y = ny * -2 + 1;
+  _raycaster.setFromCamera({ x, y }, state.camera);
+  const planeNormal = new THREE.Vector3(0, 0, 1);
+  const plane = new THREE.Plane(planeNormal, -zPlane);
+  const pt = new THREE.Vector3();
+  const hit = _raycaster.ray.intersectPlane(plane, pt);
+  return hit ? pt : null;
 }

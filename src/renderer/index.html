@@ -42,6 +42,14 @@
       <video id="bg" autoplay playsinline muted></video>
       <canvas id="gl"></canvas>
       <div id="hud"></div>
+      <div id="modal" hidden>
+        <div class="panel">
+          <div class="title">読み込み</div>
+          <div id="modal-msg">初期化中</div>
+          <div class="bar"><div id="bar-inner"></div></div>
+          <div id="modal-errors"></div>
+        </div>
+      </div>
     </div>
 
     <script src="./renderer.js" type="module"></script>
