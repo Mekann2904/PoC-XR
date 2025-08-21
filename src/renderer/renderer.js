@@ -20,6 +20,7 @@ const modal = {
   bar: document.getElementById('bar-inner'),
   errors: document.getElementById('modal-errors')
 };
+const xrHint = document.getElementById('xr-hint');
 
 const state = {
   xrMode: 'auto', // auto | xr | fb
@@ -36,6 +37,7 @@ const state = {
   inferCounter: 0,
   inferLastTs: performance.now()
 };
+state.xrPlaced = false;
 
 function setStatus(msg) { els.status.textContent = msg; }
 function showModal(msg) { modal.root.hidden = false; modal.msg.textContent = msg; modal.errors.textContent = ''; modal.bar.style.width = '0%'; }
@@ -48,6 +50,8 @@ function hudRender() {
     `infer: ${state.inferFps}fps (${state.inferMs.toFixed(1)}ms)\n` +
     `mode: ${state.xrMode}${state.hasXR ? ' (XR可)' : ' (XR不可)'}\n` +
     (state._grabbing ? 'grab: ON' : 'grab: OFF');
+  // XRヒント表示
+  xrHint.hidden = !(state.xrSession && !state.xrPlaced);
 }
 
 async function detectXR() {
@@ -142,6 +146,14 @@ async function refreshRecents() {
 
 function bindEvents() {
   els.open.addEventListener('click', handleOpen);
+  const btnReplace = document.getElementById('btn-replace');
+  btnReplace?.addEventListener('click', () => {
+    // XR再配置: アンカー解除し、設置やり直し
+    state.xrPlaced = false;
+    if (state.xrAnchor) { try { state.xrAnchor.delete && state.xrAnchor.delete(); } catch {} }
+    state.xrAnchor = null;
+    setStatus('XR再配置モード');
+  });
   els.selXR.addEventListener('change', async (e) => {
     state.xrMode = e.target.value;
     await api.setStore({ settings: { ...(await api.getStore('settings')), xrMode: state.xrMode } });
@@ -466,6 +478,7 @@ async function startXR() {
     session.addEventListener('end', () => {
       state.xrSession = null; state.hitTestSource = null; if (state.reticle) { state.scene.remove(state.reticle); state.reticle = null; }
       if (state.renderer) state.renderer.xr.enabled = false;
+      state.xrPlaced = false; state.xrAnchor = null;
       requestAnimationFrame(tick);
     });
 
@@ -479,8 +492,9 @@ async function startXR() {
           state.reticle.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
           const o = pose.transform.orientation; state.reticle.quaternion.set(o.x, o.y, o.z, o.w);
         }
-        if (!state.xrAnchor && state._grabbing && results[0].createAnchor) {
-          results[0].createAnchor().then(a => { state.xrAnchor = a; }).catch(() => {});
+        // 掴みで設置確定（未設置時のみ）
+        if (!state.xrPlaced && !state.xrAnchor && state._grabbing && results[0].createAnchor) {
+          results[0].createAnchor().then(a => { state.xrAnchor = a; state.xrPlaced = true; }).catch(() => {});
         }
       } else if (state.reticle) {
         state.reticle.visible = false;
@@ -499,6 +513,7 @@ async function startXR() {
   } catch (e) {
     console.warn('XR開始失敗', e);
     stopXR();
+    setStatus('XR開始失敗: Fallbackへ切替');
     requestAnimationFrame(tick);
   }
 }
