@@ -9,6 +9,7 @@ const els = {
   selReso: document.getElementById('sel-reso'),
   selInfer: document.getElementById('sel-infer'),
   selQuality: document.getElementById('sel-quality'),
+  selTexMax: document.getElementById('sel-texmax'),
   chkPhysics: document.getElementById('chk-physics'),
   selRecent: document.getElementById('sel-recent'),
   status: document.getElementById('status'),
@@ -52,7 +53,8 @@ const state = {
   inferLastTs: performance.now(),
   gesture: { ...defaultGesture },
   quality: 'medium',
-  physics: false
+  physics: false,
+  textureMax: 0
 };
 state.xrPlaced = false;
 
@@ -235,6 +237,16 @@ function bindEvents() {
     applyQualityPreset();
     await api.setStore({ settings: { ...(await api.getStore('settings')), quality: state.quality } });
   });
+  els.selTexMax.addEventListener('change', async (e) => {
+    state.textureMax = Number(e.target.value || 0);
+    await api.setStore({ settings: { ...(await api.getStore('settings')), textureMax: state.textureMax } });
+    setStatus(`テクスチャ最大辺=${state.textureMax || '無制限'}`);
+    if (state.model) {
+      showModal('テクスチャ縮小中');
+      await downsampleModelTextures(state.model, state.textureMax);
+      hideModal();
+    }
+  });
   els.chkPhysics.addEventListener('change', async (e) => {
     state.physics = !!e.target.checked;
     await ensurePhysics();
@@ -370,12 +382,14 @@ async function restoreSettings() {
   if (s.inferFps) state.inferFps = s.inferFps;
   if (s.quality) state.quality = s.quality;
   if (typeof s.physics === 'boolean') state.physics = s.physics;
+  if (typeof s.textureMax === 'number') state.textureMax = s.textureMax;
   if (s.gesture) state.gesture = { ...defaultGesture, ...s.gesture };
   els.selXR.value = state.xrMode;
   els.selReso.value = state.resolution;
   els.selInfer.value = String(state.inferFps);
   els.selQuality.value = state.quality;
   els.chkPhysics.checked = state.physics;
+  els.selTexMax.value = String(state.textureMax || 0);
 }
 
 async function main() {
@@ -478,6 +492,11 @@ async function loadPMX(pmxAbsPath) {
     state.model = mesh;
     applyQualityPreset();
     if (state.physics) { await ensurePhysics(); updatePhysicsBodyFromModel(); }
+    // テクスチャ縮小
+    if (state.textureMax && state.textureMax > 0) {
+      setProgress(0, 'テクスチャ縮小');
+      await downsampleModelTextures(state.model, state.textureMax);
+    }
     setStatus('PMX読み込み完了');
     hideModal();
   } catch (e) {
@@ -509,6 +528,59 @@ function placeholderDataURL() {
   g.fillStyle = '#777'; g.fillRect(0,0,2,2);
   g.fillStyle = '#999'; g.fillRect(0,0,1,1); g.fillRect(1,1,1,1);
   return c.toDataURL('image/png');
+}
+
+async function downsampleModelTextures(root, maxEdge) {
+  if (!maxEdge || maxEdge <= 0) return;
+  const texProps = ['map','normalMap','roughnessMap','metalnessMap','aoMap','emissiveMap','specularMap','alphaMap','bumpMap'];
+  const tasks = [];
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      for (const key of texProps) {
+        const tex = m[key];
+        if (tex && tex.image) tasks.push(maybeDownsampleTexture(tex, maxEdge));
+      }
+    }
+  });
+  await Promise.all(tasks);
+}
+
+function ensureImageLoaded(img) {
+  return new Promise((resolve) => {
+    if (!img) return resolve(null);
+    if (img.complete || (img.width && img.height) || img instanceof HTMLCanvasElement || img instanceof ImageBitmap) return resolve(img);
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(img);
+  });
+}
+
+async function maybeDownsampleTexture(tex, maxEdge) {
+  const img = await ensureImageLoaded(tex.image);
+  try {
+    const w = img.width || img.videoWidth || img.naturalWidth || 0;
+    const h = img.height || img.videoHeight || img.naturalHeight || 0;
+    if (!w || !h) return;
+    const curMax = Math.max(w, h);
+    if (curMax <= maxEdge) return;
+    const scale = maxEdge / curMax;
+    const nw = Math.max(1, Math.round(w * scale));
+    const nh = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = nw; canvas.height = nh;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, nw, nh);
+    tex.image = canvas;
+    tex.needsUpdate = true;
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+  } catch {
+    // ignore
+  }
 }
 
 // --- MediaPipe Hand Landmarker 雛形 ---
