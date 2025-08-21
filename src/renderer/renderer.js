@@ -503,19 +503,26 @@ async function loadPMX(pmxAbsPath) {
     const manager = new THREE.LoadingManager();
     manager.setURLModifier((url) => {
       try {
-        const abs = url.startsWith('blob:') || url.startsWith('data:')
-          ? url
-          : resolveRelative(pmxAbsPath, url);
+        let relLike = null;
+        if (url.startsWith('blob:file:')) {
+          // 例: blob:file:///tex\face.png → 相対パスとして扱う
+          relLike = url.replace(/^blob:file:\/\//, '');
+        }
+        const normUrl = (relLike || url).replace(/\\/g, '/');
+        const abs = (normUrl.startsWith('blob:') || normUrl.startsWith('data:'))
+          ? normUrl
+          : resolveRelative(pmxAbsPath, normUrl);
         if (abs.startsWith('blob:') || abs.startsWith('data:')) return abs;
         // 画像系MIMEは簡易推定
         const ext = abs.split('.').pop()?.toLowerCase();
-        const mime = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'application/octet-stream';
-        // 事前非同期変換は不可のため、キャッシュ未命中ならプレースホルダを返し、裏で変換
+        const mime = ext === 'png' ? 'image/png' : (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : (ext === 'bmp' ? 'image/bmp' : 'application/octet-stream');
+        // キャッシュがあれば即返し、無ければ裏で生成しつつプレースホルダ
         const cached = blobCache.get(abs);
         if (cached) return cached;
         toBlobURL(abs, mime).catch(() => pushError('依存読み込み失敗: ' + abs));
         return (mime.startsWith('image/')) ? placeholderDataURL() : 'data:application/octet-stream;base64,';
-      } catch {
+      } catch (e) {
+        console.warn('URL変換失敗:', url, e);
         return url;
       }
     });
