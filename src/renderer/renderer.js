@@ -713,19 +713,21 @@ async function initHandTracking() {
     // 事前確認: パッケージ有無
     const hasVision = await api.fsExistsApp('node_modules/@mediapipe/tasks-vision/vision_bundle.mjs');
     if (!hasVision) throw new Error('tasks-vision未導入');
-    // 動的import（存在時のみ絶対URLで読み込む）
-    const visionUrl = new URL('../../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs', import.meta.url).toString();
-    const mod = await import(/* @vite-ignore */ visionUrl);
+    // 動的import（importmap経由）
+    const mod = await import('@mediapipe/tasks-vision');
     vision = mod;
 
     // モデルをアプリ同梱assetsから読み込み（安全経路）
     const modelBuf = await api.fsReadApp('assets/hand_landmarker.task');
     if (!modelBuf) { if (assetHint) assetHint.hidden = false; throw new Error('モデル未配置: assets/hand_landmarker.task'); }
 
+    // 絶対URLに解決（Worker/Blob文脈でも解決可能にする）
+    const baseHref = window.location.href;
+    const wasmLoaderUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js', baseHref).toString();
+    const wasmBinaryUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm', baseHref).toString();
     const fileset = await vision.FilesetResolver.forVisionTasks({
-      // index.html からみた相対パスで指定
-      wasmLoaderPath: '../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js',
-      wasmBinaryPath: '../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm'
+      wasmLoaderPath: wasmLoaderUrl,
+      wasmBinaryPath: wasmBinaryUrl
     });
     handLm = await vision.HandLandmarker.createFromOptions(fileset, {
       baseOptions: {
@@ -736,7 +738,7 @@ async function initHandTracking() {
     });
   } catch (e) {
     // 未導入時は情報メッセージに留め、FBジェスチャ骨格のみ継続
-    const msg = String(e?.message || e);
+    const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : (typeof e === 'string' ? e : (e?.type ? `Event:${e.type}` : String(e)));
     if (state.logLevel !== 'silent') console.info('手トラッキング未導入: ', msg);
     state._needHandModel = msg.includes('モデル未配置');
     if (state._needHandModel) { setStatus('手検出モデル未配置: assetsへ配置'); if (assetHint) assetHint.hidden = false; }
