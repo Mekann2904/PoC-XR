@@ -47,6 +47,15 @@ html, body {
   border-radius: 8px;
   font-size: 12px;
 }
+#drop-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0,0,0,0.45);
+  font-size: 16px;
+  pointer-events: none;
+}
 
 #modal {
   position: absolute;

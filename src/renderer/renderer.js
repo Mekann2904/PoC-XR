@@ -21,6 +21,7 @@ const modal = {
   errors: document.getElementById('modal-errors')
 };
 const xrHint = document.getElementById('xr-hint');
+const dropHint = document.getElementById('drop-hint');
 
 const defaultGesture = {
   T_grab: 0.035,
@@ -271,6 +272,35 @@ function bindEvents() {
     calibMax = Math.max(calibMax, dist);
     calibStatus.textContent = `min=${calibMin.toFixed(3)} max=${calibMax.toFixed(3)}`;
   };
+
+  // ドラッグ&ドロップ
+  const stage = document.getElementById('stage');
+  function onDrag(e) { e.preventDefault(); e.stopPropagation(); dropHint.hidden = false; }
+  function onDragLeave(e) { e.preventDefault(); e.stopPropagation(); dropHint.hidden = true; }
+  function onDrop(e) {
+    e.preventDefault(); e.stopPropagation(); dropHint.hidden = true;
+    const files = Array.from(e.dataTransfer?.files || []);
+    const pmx = files.find(f => (f.name || '').toLowerCase().endsWith('.pmx'));
+    if (!pmx) { setStatus('PMXファイルをドロップして'); return; }
+    // Electron環境のFileにはpathが付与される。無い場合は案内。
+    const absPath = pmx.path || pmx.webkitRelativePath || '';
+    if (!absPath) { setStatus('ドロップのパス取得不可。開くで選択'); return; }
+    (async () => {
+      try {
+        await api.addRecent(absPath);
+        await api.setBaseDir(absPath.substring(0, absPath.lastIndexOf('/')));
+        await loadPMX(absPath);
+        await refreshRecents();
+      } catch (err) {
+        console.error(err); setStatus('ドロップ読み込み失敗');
+      }
+    })();
+  }
+  ;['dragenter','dragover'].forEach(ev => stage.addEventListener(ev, onDrag));
+  ;['dragleave','dragend'].forEach(ev => stage.addEventListener(ev, onDragLeave));
+  stage.addEventListener('drop', onDrop);
+  // ページ全体でデフォルトのファイルオープンを防止
+  ['dragover','drop'].forEach(ev => document.addEventListener(ev, (e)=>{ e.preventDefault(); e.stopPropagation(); }, false));
 }
 
 async function restoreSettings() {
