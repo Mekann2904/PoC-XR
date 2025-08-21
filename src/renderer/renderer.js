@@ -474,6 +474,18 @@ async function toBlobURL(absPath, mime = 'application/octet-stream') {
   return url;
 }
 
+// アプリ同梱リソースをBlob URL化
+async function toBlobURLApp(relPath, mime = 'application/octet-stream') {
+  const key = `app:${relPath}`;
+  if (blobCache.has(key)) return blobCache.get(key);
+  const buf = await api.fsReadApp(relPath);
+  if (!buf) throw new Error('読み込み失敗(app): ' + relPath);
+  const u8 = new Uint8Array(buf);
+  const url = URL.createObjectURL(new Blob([u8], { type: mime }));
+  blobCache.set(key, url);
+  return url;
+}
+
 function resolveRelative(baseAbs, rel) {
   // 簡易解決（Electron側でベース外は拒否）
   rel = rel.replace(/\\/g, '/');
@@ -721,10 +733,9 @@ async function initHandTracking() {
     const modelBuf = await api.fsReadApp('assets/hand_landmarker.task');
     if (!modelBuf) { if (assetHint) assetHint.hidden = false; throw new Error('モデル未配置: assets/hand_landmarker.task'); }
 
-    // 絶対URLに解決（Worker/Blob文脈でも解決可能にする）
-    const baseHref = window.location.href;
-    const wasmLoaderUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js', baseHref).toString();
-    const wasmBinaryUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm', baseHref).toString();
+    // file://のfetch制限を避けるため、WASMローダ/バイナリをBlob URLに変換
+    const wasmLoaderUrl = await toBlobURLApp('node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js', 'text/javascript');
+    const wasmBinaryUrl = await toBlobURLApp('node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm', 'application/wasm');
     const fileset = await vision.FilesetResolver.forVisionTasks({
       wasmLoaderPath: wasmLoaderUrl,
       wasmBinaryPath: wasmBinaryUrl
