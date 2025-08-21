@@ -96,3 +96,8 @@ html, body {
 #gest-panel .row.end { grid-template-columns: auto auto; justify-content: end; }
 #gest-panel label { font-size: 12px; opacity: 0.9; }
 #gest-panel input[type=range] { width: 240px; }
+
+#verify-panel { position: absolute; inset: 0; background: rgba(0,0,0,0.55); display: grid; place-items: center; }
+#verify-panel .panel { width: min(420px, 90vw); background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
+#verify-panel .row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; margin-top: 8px; }
+#verify-panel .row.end { grid-template-columns: auto; justify-content: end; }

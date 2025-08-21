@@ -46,6 +46,10 @@ const state = {
   renderer: null,
   scene: null,
   camera: null,
+  // Fallback用 擬似Z（z=0基準の前後位置）
+  fbZ: 0,
+  fbZMin: -1.0,
+  fbZMax: 1.0,
   lastFrameTs: performance.now(),
   fps: 0,
   inferMs: 0,
@@ -54,7 +58,9 @@ const state = {
   gesture: { ...defaultGesture },
   quality: 'medium',
   physics: false,
-  textureMax: 0
+  textureMax: 0,
+  logLevel: 'info',
+  lastHands: 0
 };
 state.xrPlaced = false;
 
@@ -383,6 +389,7 @@ async function restoreSettings() {
   if (s.quality) state.quality = s.quality;
   if (typeof s.physics === 'boolean') state.physics = s.physics;
   if (typeof s.textureMax === 'number') state.textureMax = s.textureMax;
+  if (s.logLevel) state.logLevel = s.logLevel;
   if (s.gesture) state.gesture = { ...defaultGesture, ...s.gesture };
   els.selXR.value = state.xrMode;
   els.selReso.value = state.resolution;
@@ -394,6 +401,7 @@ async function restoreSettings() {
 
 async function main() {
   bindEvents();
+  bindVerifyPanel();
   await restoreSettings();
   await detectXR();
   await startCamera();
@@ -403,6 +411,51 @@ async function main() {
   await initHandTracking();
   await ensurePhysics();
   await ensureModeLoop();
+}
+
+// 受入基準パネル
+let verifyTimer = null;
+function bindVerifyPanel() {
+  const btn = document.getElementById('btn-verify');
+  const panel = document.getElementById('verify-panel');
+  const close = document.getElementById('btn-ver-close');
+  const elMode = document.getElementById('ver-mode');
+  const elFps = document.getElementById('ver-fps');
+  const elInfer = document.getElementById('ver-infer');
+  const elHands = document.getElementById('ver-hands');
+  const elLat = document.getElementById('ver-lat');
+  const elPass = document.getElementById('ver-pass');
+  const selLog = document.getElementById('ver-log');
+
+  function update() {
+    const xr = !!state.xrSession;
+    const fps = state.fps;
+    const infer = state.inferMs;
+    const lat = infer + (1000 / Math.max(1, fps));
+    const pass = xr ? (lat <= 120) : (fps >= 24);
+    elMode.textContent = xr ? 'XR(A)' : 'FB(B)';
+    elFps.textContent = fps.toFixed(1);
+    elInfer.textContent = infer.toFixed(1);
+    elHands.textContent = String(state.lastHands);
+    elLat.textContent = lat.toFixed(1);
+    elPass.textContent = pass ? 'OK' : 'NG';
+    elPass.style.color = pass ? '#4caf50' : '#ff5252';
+  }
+
+  btn?.addEventListener('click', async () => {
+    selLog.value = state.logLevel;
+    panel.hidden = false;
+    if (verifyTimer) clearInterval(verifyTimer);
+    verifyTimer = setInterval(update, 250);
+  });
+  close?.addEventListener('click', () => {
+    panel.hidden = true;
+    if (verifyTimer) { clearInterval(verifyTimer); verifyTimer = null; }
+  });
+  selLog.addEventListener('change', async () => {
+    state.logLevel = selLog.value;
+    await api.setStore({ settings: { ...(await api.getStore('settings')), logLevel: state.logLevel } });
+  });
 }
 
 main();
@@ -639,6 +692,10 @@ function updatePhysicsBodyFromModel() {
 }
 let pinchBaseline = null;
 let yawPrev = null;
+// 擬似Z用（片手ピンチ強度→Z平面）
+let pinchZBaseline = null;
+let fbZGrabStart = 0;
+let oneZPlane = null;
 state._grabbing = false;
 state._grabbing2 = false;
 async function initHandTracking() {
@@ -677,6 +734,7 @@ async function initHandTracking() {
     if (handLm && els.video.readyState >= 2) {
       try {
         const res = handLm.detectForVideo(els.video, performance.now());
+        state.lastHands = (res?.landmarks || []).length;
         updateFromHands(res);
       } catch (e) {
         // 推論失敗は継続
@@ -710,11 +768,27 @@ function updateFromHands(result) {
     state._grabbing2 = false;
   }
 
-  // 位置/回転（片手）
+  // 位置/回転（片手）+ 擬似Z（片手ピンチ強度）
   if (state._grabbing && h0) {
     const c = handCenter(h0);
     const yaw = handYaw(h0);
-    const pt = screenToWorld(c.x, c.y, 0);
+    // 擬似Z更新（両手グラブ時はスケール優先のため無効化）
+    if (!state._grabbing2) {
+      const d0z = pinchDistance(h0);
+      if (pinchZBaseline == null) { pinchZBaseline = d0z; fbZGrabStart = state.fbZ; }
+      const ratio = Math.max(0.2, Math.min(5.0, d0z / Math.max(1e-5, pinchZBaseline)));
+      const targetZ = Math.max(state.fbZMin, Math.min(state.fbZMax, fbZGrabStart + 0.5 * (1 - ratio)));
+      const dt = Math.max(1e-3, state.inferMs / 1000);
+      if (state.gesture.filter === 'oneeuro') {
+        oneZPlane ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+        state.fbZ = oneZPlane.filter(targetZ, dt);
+      } else {
+        state.fbZ = state.fbZ + (targetZ - state.fbZ) * state.gesture.posAlpha;
+      }
+    } else {
+      pinchZBaseline = null;
+    }
+    const pt = screenToWorld(c.x, c.y, state.fbZ);
     const dt = Math.max(1e-3, state.inferMs / 1000);
     if (pt) {
       if (state.gesture.filter === 'oneeuro') {
@@ -741,6 +815,7 @@ function updateFromHands(result) {
     }
   } else {
     yawPrev = null;
+    pinchZBaseline = null;
   }
 
   // スケール（両手）

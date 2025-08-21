@@ -51,6 +51,7 @@
       </select>
       <button id="btn-replace" title="XR再配置">再配置</button>
       <button id="btn-gest" title="ジェスチャー調整">調整</button>
+      <button id="btn-verify" title="受入基準の自己検証">検証</button>
       <span id="status"></span>
     </div>
 
@@ -114,6 +115,27 @@
           <div class="row end">
             <button id="btn-gest-save">保存</button>
             <button id="btn-gest-close">閉じる</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="verify-panel" hidden>
+        <div class="panel">
+          <div class="title">受入基準の自己検証</div>
+          <div class="row"><span>モード</span><span id="ver-mode"></span></div>
+          <div class="row"><span>fps</span><span id="ver-fps"></span></div>
+          <div class="row"><span>推論(ms)</span><span id="ver-infer"></span></div>
+          <div class="row"><span>検出手数</span><span id="ver-hands"></span></div>
+          <div class="row"><span>遅延推定(ms)</span><span id="ver-lat"></span></div>
+          <div class="row"><span>判定</span><span id="ver-pass"></span></div>
+          <div class="row"><span>ログレベル</span>
+            <select id="ver-log">
+              <option value="info">INFO</option>
+              <option value="debug">DEBUG</option>
+            </select>
+          </div>
+          <div class="row end">
+            <button id="btn-ver-close">閉じる</button>
           </div>
         </div>
       </div>
