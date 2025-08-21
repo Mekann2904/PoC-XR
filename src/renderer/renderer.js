@@ -46,7 +46,8 @@ function pushError(e) { modal.errors.textContent += (modal.errors.textContent ? 
 function hudRender() {
   els.hud.innerText = `fps: ${state.fps.toFixed(0)}\n` +
     `infer: ${state.inferFps}fps (${state.inferMs.toFixed(1)}ms)\n` +
-    `mode: ${state.xrMode}${state.hasXR ? ' (XR可)' : ' (XR不可)'}\n`;
+    `mode: ${state.xrMode}${state.hasXR ? ' (XR可)' : ' (XR不可)'}\n` +
+    (state._grabbing ? 'grab: ON' : 'grab: OFF');
 }
 
 async function detectXR() {
@@ -96,6 +97,9 @@ async function initThree() {
   state.camera = new THREE.PerspectiveCamera(60, els.canvas.clientWidth / els.canvas.clientHeight, 0.01, 20);
   const light = new THREE.HemisphereLight(0xffffff, 0x222233, 1.0);
   state.scene.add(light);
+  // モデルの親（XRアンカー/FB位置を集約）
+  state.modelRoot = new THREE.Group();
+  state.scene.add(state.modelRoot);
 }
 
 function resize() {
@@ -113,7 +117,7 @@ function tick(ts) {
   state.lastFrameTs = ts;
   state.fps = 1000 / Math.max(1, dt);
 
-  if (state.renderer && state.scene && state.camera) {
+  if (!state.xrSession && state.renderer && state.scene && state.camera) {
     state.renderer.render(state.scene, state.camera);
   }
 
@@ -141,6 +145,7 @@ function bindEvents() {
   els.selXR.addEventListener('change', async (e) => {
     state.xrMode = e.target.value;
     await api.setStore({ settings: { ...(await api.getStore('settings')), xrMode: state.xrMode } });
+    await ensureModeLoop();
   });
   els.selReso.addEventListener('change', async (e) => {
     state.resolution = e.target.value;
@@ -180,7 +185,7 @@ async function main() {
   await initThree();
   await refreshRecents();
   await initHandTracking();
-  requestAnimationFrame(tick);
+  await ensureModeLoop();
 }
 
 main();
@@ -248,9 +253,10 @@ async function loadPMX(pmxAbsPath) {
     const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'model/pmx' }));
 
     // 既存モデルをクリア
-    for (let i = state.scene.children.length - 1; i >= 0; i--) {
-      const o = state.scene.children[i];
-      if (o.userData?.tag === 'pmx') state.scene.remove(o);
+    const parent = state.modelRoot || state.scene;
+    for (let i = parent.children.length - 1; i >= 0; i--) {
+      const o = parent.children[i];
+      if (o.userData?.tag === 'pmx') parent.remove(o);
     }
 
     setStatus('PMX読み込み中');
@@ -265,7 +271,7 @@ async function loadPMX(pmxAbsPath) {
     });
     mesh.userData.tag = 'pmx';
     autoPlace(mesh);
-    state.scene.add(mesh);
+    state.modelRoot.add(mesh);
     state.model = mesh;
     setStatus('PMX読み込み完了');
     hideModal();
@@ -304,6 +310,13 @@ function placeholderDataURL() {
 let inferTimer = null;
 let handLm = null;
 let vision = null;
+// 平滑化（EMA）・状態
+const smooth = { posAlpha: 0.5, rotAlpha: 0.7 };
+const filt = { pos: new THREE.Vector3(), rotY: 0, scale: 1 };
+let pinchBaseline = null;
+let yawPrev = null;
+state._grabbing = false;
+state._grabbing2 = false;
 async function initHandTracking() {
   if (inferTimer) { clearInterval(inferTimer); inferTimer = null; }
   try {
@@ -351,19 +364,54 @@ async function initHandTracking() {
 }
 
 function updateFromHands(result) {
-  // 簡易マッピング（Fallback層想定）: 片手ピンチで掴み、位置をZ=0平面へ投影
-  const lm = (result?.landmarks && result.landmarks[0]) || null;
-  if (!lm || !state.model) return;
-  const thumb = lm[4], index = lm[8];
-  const dx = (thumb.x - index.x), dy = (thumb.y - index.y);
-  const dist = Math.hypot(dx, dy);
+  if (!state.modelRoot) return;
+  const hands = result?.landmarks || [];
+  const h0 = hands[0];
+  const h1 = hands[1];
   const T_grab = 0.035, T_release = 0.045;
-  state._grabbing = state._grabbing ? (dist < T_release) : (dist < T_grab);
-  if (!state._grabbing) return;
-  const cx = (lm[0].x + lm[5].x + lm[17].x) / 3;
-  const cy = (lm[0].y + lm[5].y + lm[17].y) / 3;
-  const pt = screenToWorld(cx, cy, 0);
-  if (pt) state.model.position.copy(pt);
+
+  if (h0) {
+    const d0 = pinchDistance(h0);
+    state._grabbing = state._grabbing ? (d0 < T_release) : (d0 < T_grab);
+  } else {
+    state._grabbing = false;
+  }
+  if (h1) {
+    const d1 = pinchDistance(h1);
+    state._grabbing2 = state._grabbing2 ? (d1 < T_release) : (d1 < T_grab);
+  } else {
+    state._grabbing2 = false;
+  }
+
+  // 位置/回転（片手）
+  if (state._grabbing && h0) {
+    const c = handCenter(h0);
+    const yaw = handYaw(h0);
+    const pt = screenToWorld(c.x, c.y, 0);
+    if (pt) {
+      filt.pos.lerp(pt, smooth.posAlpha);
+      state.modelRoot.position.copy(filt.pos);
+    }
+    if (isFinite(yaw)) {
+      if (yawPrev == null) yawPrev = yaw;
+      filt.rotY = lerpAngle(filt.rotY, yaw, smooth.rotAlpha);
+      state.modelRoot.rotation.y = filt.rotY;
+    }
+  } else {
+    yawPrev = null;
+  }
+
+  // スケール（両手）
+  if (state._grabbing && state._grabbing2 && h0 && h1 && state.model) {
+    const c0 = handCenter(h0), c1 = handCenter(h1);
+    const dist = Math.hypot(c0.x - c1.x, c0.y - c1.y);
+    if (pinchBaseline == null) pinchBaseline = dist;
+    const target = Math.max(0.2, Math.min(5.0, 1.0 * (dist / Math.max(1e-5, pinchBaseline))));
+    filt.scale = filt.scale + (target - filt.scale) * smooth.posAlpha;
+    state.model.scale.setScalar(filt.scale);
+  } else {
+    pinchBaseline = null;
+  }
 }
 
 const _raycaster = new THREE.Raycaster();
@@ -378,3 +426,92 @@ function screenToWorld(nx, ny, zPlane = 0) {
   const hit = _raycaster.ray.intersectPlane(plane, pt);
   return hit ? pt : null;
 }
+// --- XR層（A: WebXR Hit Test） ---
+state.xrSession = null;
+state.xrRefSpace = null;
+state.viewerSpace = null;
+state.hitTestSource = null;
+state.xrAnchor = null;
+state.reticle = null;
+
+async function ensureModeLoop() {
+  if (state.xrMode === 'xr' || (state.xrMode === 'auto' && state.hasXR)) {
+    await startXR();
+  } else {
+    stopXR();
+    requestAnimationFrame(tick);
+  }
+}
+
+function stopXR() {
+  if (state.xrSession) {
+    try { state.xrSession.end(); } catch {}
+  }
+  state.xrSession = null;
+  if (state.renderer) state.renderer.xr.enabled = false;
+}
+
+async function startXR() {
+  if (!navigator.xr) { requestAnimationFrame(tick); return; }
+  try {
+    const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hit-test'] });
+    state.xrSession = session;
+    state.renderer.xr.enabled = true;
+    state.renderer.xr.setReferenceSpaceType('local');
+    state.viewerSpace = await session.requestReferenceSpace('viewer');
+    state.xrRefSpace = await session.requestReferenceSpace('local');
+    state.hitTestSource = await session.requestHitTestSource({ space: state.viewerSpace });
+    createReticle();
+
+    session.addEventListener('end', () => {
+      state.xrSession = null; state.hitTestSource = null; if (state.reticle) { state.scene.remove(state.reticle); state.reticle = null; }
+      if (state.renderer) state.renderer.xr.enabled = false;
+      requestAnimationFrame(tick);
+    });
+
+    state.renderer.setAnimationLoop((t, frame) => {
+      if (!frame) return;
+      const results = state.hitTestSource ? frame.getHitTestResults(state.hitTestSource) : [];
+      if (results.length > 0) {
+        const pose = results[0].getPose(state.xrRefSpace);
+        if (pose && state.reticle) {
+          state.reticle.visible = true;
+          state.reticle.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+          const o = pose.transform.orientation; state.reticle.quaternion.set(o.x, o.y, o.z, o.w);
+        }
+        if (!state.xrAnchor && state._grabbing && results[0].createAnchor) {
+          results[0].createAnchor().then(a => { state.xrAnchor = a; }).catch(() => {});
+        }
+      } else if (state.reticle) {
+        state.reticle.visible = false;
+      }
+
+      if (state.xrAnchor) {
+        const pose = frame.getPose(state.xrAnchor.anchorSpace || state.xrAnchor, state.xrRefSpace);
+        if (pose) {
+          state.modelRoot.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+          const o = pose.transform.orientation; state.modelRoot.quaternion.set(o.x, o.y, o.z, o.w);
+        }
+      }
+
+      state.renderer.render(state.scene, state.camera);
+    });
+  } catch (e) {
+    console.warn('XR開始失敗', e);
+    stopXR();
+    requestAnimationFrame(tick);
+  }
+}
+
+function createReticle() {
+  if (state.reticle) return;
+  const geom = new THREE.RingGeometry(0.05, 0.06, 32);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x33ff66, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.rotation.x = -Math.PI / 2; mesh.visible = false; state.reticle = mesh; state.scene.add(mesh);
+}
+
+function pinchDistance(h) { const a = h[4], b = h[8]; return Math.hypot(a.x - b.x, a.y - b.y); }
+function handCenter(h) { const cx = (h[0].x + h[5].x + h[17].x) / 3; const cy = (h[0].y + h[5].y + h[17].y) / 3; return { x: cx, y: cy }; }
+function handYaw(h) { const a = h[0], b = h[9]; const vx = b.x - a.x, vy = b.y - a.y; return Math.atan2(-vx, -vy); }
+function lerpAngle(a, b, t) { let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI; return a + d * t; }
