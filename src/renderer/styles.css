@@ -6,6 +6,8 @@ html, body {
   color: #e6e6e6;
   font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif;
 }
+/* [重要] hidden属性の強制非表示（UAルールがdisplay指定で上書きされるのを防ぐ） */
+[hidden] { display: none !important; }
 #toolbar {
   display: flex;
   gap: 8px;

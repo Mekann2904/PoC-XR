@@ -714,8 +714,9 @@ async function initHandTracking() {
     if (!modelBuf) throw new Error('モデル未配置: assets/hand_landmarker.task');
 
     const fileset = await vision.FilesetResolver.forVisionTasks({
-      wasmLoaderPath: 'node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js',
-      wasmBinaryPath: 'node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm'
+      // index.html からみた相対パスで指定
+      wasmLoaderPath: '../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js',
+      wasmBinaryPath: '../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm'
     });
     handLm = await vision.HandLandmarker.createFromOptions(fileset, {
       baseOptions: {
