@@ -655,7 +655,7 @@ function autoPlace(obj) {
 
   cam.position.set(
     modelCenter.x,
-    modelCenter.y + size.y * scale * 0.5, // 少し上から
+    modelCenter.y, // Y座標をモデル中心に合わせる
     modelCenter.z + distance
   );
   cam.lookAt(modelCenter);
