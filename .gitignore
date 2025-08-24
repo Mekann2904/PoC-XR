@@ -1,0 +1,36 @@
+# Node/Electron
+node_modules/
+dist/
+out/
+build/
+release/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Env files
+.env
+.env.*
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Coverage/Cache
+coverage/
+.nyc_output/
+.cache/
+
+# Packaging
+*.tgz
+
+# Misc
+*.pid
+*.pid.lock
+
