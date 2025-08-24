@@ -605,9 +605,15 @@ async function loadPMX(pmxAbsPath) {
     state.modelRoot.add(mesh);
     state.model = mesh;
 
-    console.log('Model added to scene at position:', state.modelRoot.position);
-    console.log('Model scale:', mesh.scale);
-    console.log('Camera position:', state.camera.position);
+    console.log('--- Jules Debug Info ---');
+    console.log('Final modelRoot position:', JSON.stringify(state.modelRoot.position, null, 2));
+    console.log('Final model (mesh) local position:', JSON.stringify(mesh.position, null, 2));
+    console.log('Final model (mesh) scale:', JSON.stringify(mesh.scale, null, 2));
+    console.log('Final camera position:', JSON.stringify(state.camera.position, null, 2));
+    const lookAtDir = new THREE.Vector3();
+    state.camera.getWorldDirection(lookAtDir);
+    console.log('Final camera direction vector:', JSON.stringify(lookAtDir, null, 2));
+    console.log('--- End Jules Debug Info ---');
 
     applyQualityPreset();
     if (state.physics) { await ensurePhysics(); updatePhysicsBodyFromModel(); }
