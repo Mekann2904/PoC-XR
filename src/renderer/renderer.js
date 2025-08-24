@@ -43,8 +43,8 @@ const defaultGesture = {
 
 const state = {
   xrMode: 'auto', // auto | xr | fb
-  resolution: '1080p',
-  inferFps: 30,
+  resolution: '720p',
+  inferFps: 24,
   inferReso: '360p', // 360p | 480p（推論用）
   hasXR: false,
   three: null,
@@ -182,9 +182,10 @@ async function initThree() {
     canvas: els.canvas, 
     antialias: true, 
     alpha: true,
-    premultipliedAlpha: false 
+    premultipliedAlpha: false,
+    powerPreference: 'high-performance'
   });
-  state.renderer.setPixelRatio(window.devicePixelRatio);
+  applyPixelRatio();
   state.renderer.outputColorSpace = THREE.SRGBColorSpace;
   state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
   state.renderer.toneMappingExposure = 1.0;
@@ -213,7 +214,7 @@ async function initThree() {
   state.lightDir = new THREE.DirectionalLight(0xffffff, 0.8);
   state.lightDir.position.set(2, 4, 3);
   state.lightDir.castShadow = true;
-  state.lightDir.shadow.mapSize.set(2048, 2048);
+  state.lightDir.shadow.mapSize.set(1024, 1024);
   state.lightDir.shadow.camera.near = 0.5;
   state.lightDir.shadow.camera.far = 50;
   state.lightDir.shadow.camera.left = -10;
@@ -236,25 +237,43 @@ async function initThree() {
   state.scene.add(state.modelRoot);
 }
 
+function applyPixelRatio() {
+  if (!state.renderer) return;
+  const dpr = window.devicePixelRatio || 1;
+  let cap = 1.25; // medium 既定
+  switch (state.quality) {
+    case 'low': cap = 1.0; break;
+    case 'high': cap = 1.5; break;
+  }
+  state.renderer.setPixelRatio(Math.min(dpr, cap));
+}
+
 function applyQualityPreset() {
   const q = state.quality || 'medium';
   if (!state.renderer) return;
+  applyPixelRatio();
   if (q === 'low') {
     state.renderer.shadowMap.enabled = false;
     state.lightDir.intensity = 0.5;
     state.lightHemi.intensity = 0.8;
     state.ground.visible = false;
+    state.renderer.toneMapping = THREE.NoToneMapping;
   } else if (q === 'high') {
     state.renderer.shadowMap.enabled = true;
     state.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    state.lightDir.shadow.mapSize.set(2048, 2048);
     state.lightDir.intensity = 1.0;
     state.lightHemi.intensity = 1.0;
     state.ground.visible = true;
+    state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
   } else {
     state.renderer.shadowMap.enabled = true;
+    state.renderer.shadowMap.type = THREE.PCFShadowMap;
+    state.lightDir.shadow.mapSize.set(1024, 1024);
     state.lightDir.intensity = 0.7;
     state.lightHemi.intensity = 0.9;
     state.ground.visible = true;
+    state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
   }
   if (state.model) { state.model.traverse(o => { if (o.isMesh) o.castShadow = (q !== 'low'); }); }
 }
@@ -263,6 +282,7 @@ function resize() {
   const w = els.canvas.clientWidth;
   const h = els.canvas.clientHeight;
   if (state.renderer) state.renderer.setSize(w, h, false);
+  applyPixelRatio();
   if (state.camera) {
     state.camera.aspect = w / h;
     state.camera.updateProjectionMatrix();
@@ -654,26 +674,30 @@ async function loadPMX(pmxAbsPath) {
       console.warn('No files found in base directory:', baseDir);
     }
 
-    // テクスチャファイルのキャッシュ
+    // テクスチャファイルの事前キャッシュ（上限を設定して過負荷を回避）
     const imageExt = ['png', 'jpg', 'jpeg', 'bmp', 'tga'];
-    const imageFiles = allFiles.filter(p => {
+    let imageFiles = allFiles.filter(p => {
       const ext = p.split('.').pop()?.toLowerCase();
       return imageExt.includes(ext);
     });
+    const LIMIT = 200;
+    const truncated = imageFiles.length > LIMIT;
+    if (truncated) imageFiles = imageFiles.slice(0, LIMIT);
     
     if (imageFiles.length > 0) {
       setProgress(10, 'テクスチャキャッシュ中');
       const imagePromises = imageFiles.map(async (p) => {
         try {
           const ext = p.split('.').pop()?.toLowerCase();
-          return await toBlobURL(p, `image/${ext}`);
+          const mime = (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : (ext === 'png' ? 'image/png' : `image/${ext}`);
+          return await toBlobURL(p, mime);
         } catch (err) {
           console.warn('Failed to cache texture:', p, err);
           return null;
         }
       });
       await Promise.all(imagePromises);
-      console.log(`${imageFiles.length} texture files cached.`);
+      console.log(`${imageFiles.length}${truncated ? `/${allFiles.length}` : ''} texture files cached.`);
     }
 
     setProgress(20, 'PMXファイル読み込み中');
@@ -704,8 +728,7 @@ async function loadPMX(pmxAbsPath) {
       if (blobCache.has(absolutePath)) {
         return blobCache.get(absolutePath);
       }
-
-      console.warn(`Texture not in cache, using placeholder: ${absolutePath} (from: ${url})`);
+      // キャッシュに無い場合はプレースホルダ
       return placeholderDataURL();
     });
 
@@ -1001,7 +1024,8 @@ async function initHandTracking() {
     );
     handLm = await vision.HandLandmarker.createFromOptions(fileset, {
       baseOptions: {
-        modelAssetBuffer: new Uint8Array(modelBuf)
+        modelAssetBuffer: new Uint8Array(modelBuf),
+        delegate: 'GPU'
       },
       runningMode: 'VIDEO',
       numHands: 2
