@@ -33,6 +33,8 @@ const defaultGesture = {
   filter: 'ema',
   posAlpha: 0.5,
   rotAlpha: 0.7,
+  // 非掴み時の回転→スケール変換ゲイン
+  scaleGain: 0.5,
   minCutoff: 1.0,
   beta: 0.3,
   dCutoff: 1.0
@@ -781,7 +783,7 @@ function updatePhysicsBodyFromModel() {
 }
 let pinchBaseline = null;
 let pinchScaleBaseline = null;
-let rollScaleBaseline = null;
+let yawScalePrev = null;
 let yawPrev = null;
 // 擬似Z用（片手ピンチ強度→Z平面）
 let pinchZBaseline = null;
@@ -904,43 +906,27 @@ function updateFromHands(result) {
     yawPrev = null;
   }
 
-  // --- スケール調整 ---
-  if (state._grabbing && state._grabbing2 && h0 && h1 && state.model) {
-    // --- 両手スケール ---
-    const c0 = handCenter(h0), c1 = handCenter(h1);
-    const dist = Math.hypot(c0.x - c1.x, c0.y - c1.y);
-    if (pinchBaseline == null) {
-      pinchBaseline = { dist: dist, scale: state.model.scale.x };
-    }
-    const target = Math.max(0.2, Math.min(5.0, pinchBaseline.scale * (dist / Math.max(1e-5, pinchBaseline.dist))));
-    filt.scale = filt.scale + (target - filt.scale) * state.gesture.posAlpha;
+  // --- スケール調整（非掴み時: 手首の水平角の変化量→スケール） ---
+  if (!state._grabbing && h0 && state.model) {
+    const yaw = handYaw(h0);
+    // ベースライン初期化
+    if (yawScalePrev == null || !isFinite(yawScalePrev)) yawScalePrev = yaw;
+    let dYaw = yaw - yawScalePrev;
+    // [-π, π]へ正規化
+    if (dYaw > Math.PI) dYaw -= 2 * Math.PI;
+    if (dYaw < -Math.PI) dYaw += 2 * Math.PI;
+    // 乗算型スケール更新
+    const targetScale = Math.max(0.2, Math.min(5.0, filt.scale * (1 + state.gesture.scaleGain * dYaw)));
+    filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha;
     state.model.scale.setScalar(filt.scale);
-    
-    rollScaleBaseline = null; // 他のジェスチャーの基準はリセット
-
-  } else if (!state._grabbing && h0 && state.model) {
-    // --- 片手開きロールスケール ---
-    const roll = handRoll(h0);
-    if (rollScaleBaseline === null) {
-        rollScaleBaseline = { initialRoll: roll, initialScale: state.model.scale.x };
-    }
-    
-    let deltaRoll = roll - rollScaleBaseline.initialRoll;
-    if (deltaRoll > Math.PI) deltaRoll -= 2 * Math.PI;
-    if (deltaRoll < -Math.PI) deltaRoll += 2 * Math.PI;
-
-    const scaleFactor = 1 - deltaRoll * 1.0; // Sensitivity (inverted)
-    const targetScale = rollScaleBaseline.initialScale * scaleFactor;
-    const newScale = Math.max(0.1, Math.min(10.0, targetScale));
-    
-    filt.scale = filt.scale + (newScale - filt.scale) * state.gesture.posAlpha;
-    state.model.scale.setScalar(filt.scale);
-
-    pinchBaseline = null; // 他のジェスチャーの基準はリセット
-  } else {
-    // スケールジェスチャーが行われていない場合はリセット
+    // 次回の基準角を更新
+    yawScalePrev = yaw;
+    // 他の基準はリセット
     pinchBaseline = null;
-    rollScaleBaseline = null;
+  } else {
+    // 掴み中/手なし: スケール基準をリセット
+    pinchBaseline = null;
+    yawScalePrev = null;
   }
 }
 
