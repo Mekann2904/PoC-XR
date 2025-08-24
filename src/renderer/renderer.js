@@ -636,7 +636,7 @@ function autoPlace(obj) {
   console.log('Model center:', center.x, center.y, center.z);
   
   // モデルを原点に移動（バウンディングボックスの中心を基準）
-  obj.position.copy(center).negate();
+  obj.position.sub(center);
   
   // 適切なスケールを計算（画面の30%程度になるように、より小さめに）
   const targetScreenRatio = 0.3;
@@ -655,7 +655,7 @@ function autoPlace(obj) {
 
   cam.position.set(
     modelCenter.x,
-    modelCenter.y, // Y座標をモデル中心に合わせる
+    modelCenter.y + size.y * scale * 0.5, // 少し上から
     modelCenter.z + distance
   );
   cam.lookAt(modelCenter);
