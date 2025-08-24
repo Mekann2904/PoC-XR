@@ -65,7 +65,8 @@ const state = {
   physics: false,
   textureMax: 0,
   logLevel: 'info',
-  lastHands: 0
+  lastHands: 0,
+  stream: null
 };
 state.xrPlaced = false;
 
@@ -158,9 +159,14 @@ function getUserMediaConstraints() {
 }
 
 async function startCamera() {
+  if (state.stream) {
+    state.stream.getTracks().forEach(t => t.stop());
+    state.stream = null;
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia(getUserMediaConstraints());
     els.video.srcObject = stream;
+    state.stream = stream;
     setStatus('カメラ開始');
   } catch (e) {
     // 降格リトライ
@@ -289,13 +295,49 @@ function resize() {
   }
 }
 
-function tick(ts) {
+function animate(ts, frame) {
   const dt = ts - state.lastFrameTs;
   state.lastFrameTs = ts;
   state.fps = 1000 / Math.max(1, dt);
 
-  // 物理ステップ（FB時）
-  if (!state.xrSession && phys.enabled && phys.world) {
+  // XRモードの処理
+  if (frame) {
+    const results = state.hitTestSource ? frame.getHitTestResults(state.hitTestSource) : [];
+    if (results.length > 0) {
+      const pose = results[0].getPose(state.xrRefSpace);
+      if (pose && state.reticle) {
+        state.reticle.visible = true;
+        state.reticle.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+        const o = pose.transform.orientation; state.reticle.quaternion.set(o.x, o.y, o.z, o.w);
+      }
+      if (!state.xrPlaced && !state.xrAnchor && state._grabbing && results[0].createAnchor) {
+        results[0].createAnchor().then(a => { state.xrAnchor = a; state.xrPlaced = true; }).catch(() => {});
+      }
+    } else if (state.reticle) {
+      state.reticle.visible = false;
+    }
+
+    if (state.xrAnchor) {
+      const pose = frame.getPose(state.xrAnchor.anchorSpace || state.xrAnchor, state.xrRefSpace);
+      if (pose) {
+        state.modelRoot.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+        const o = pose.transform.orientation; state.modelRoot.quaternion.set(o.x, o.y, o.z, o.w);
+      }
+    }
+  } else {
+    // FBモードのサイズチェック
+    const canvas = state.renderer.domElement;
+    const displayWidth = canvas.clientWidth;
+    const displayHeight = canvas.clientHeight;
+    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+      state.renderer.setSize(displayWidth, displayHeight, false);
+      state.camera.aspect = displayWidth / displayHeight;
+      state.camera.updateProjectionMatrix();
+    }
+  }
+
+  // 共通の物理更新
+  if (phys.enabled && phys.world) {
     phys.world.step(1/60);
     if (phys.body && !state._grabbing) {
       const b = phys.body.position; state.modelRoot.position.set(b.x, b.y, b.z);
@@ -304,25 +346,14 @@ function tick(ts) {
     }
   }
 
-  // レンダリング（非XR時）
-  if (!state.xrSession && state.renderer && state.scene && state.camera) {
-    // キャンバスのサイズが変更されている場合の対応
-    const canvas = state.renderer.domElement;
-    const displayWidth = canvas.clientWidth;
-    const displayHeight = canvas.clientHeight;
-    
-    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
-      state.renderer.setSize(displayWidth, displayHeight, false);
-      state.camera.aspect = displayWidth / displayHeight;
-      state.camera.updateProjectionMatrix();
-    }
-    
+  // 共通のレンダリングとHUD更新
+  if (state.renderer && state.scene && state.camera) {
     state.renderer.render(state.scene, state.camera);
   }
-
   hudRender();
-  requestAnimationFrame(tick);
 }
+
+
 
 async function handleOpen() {
   const fp = await api.openModel();
@@ -549,6 +580,7 @@ async function main() {
   await refreshRecents();
   await initHandTracking();
   await ensurePhysics();
+  state.renderer.setAnimationLoop(animate);
   await ensureModeLoop();
 }
 
@@ -598,6 +630,33 @@ function bindVerifyPanel() {
 }
 
 main();
+
+function disposeModelResources(model) {
+  if (!model) return;
+  model.traverse((child) => {
+    if (child.isMesh) {
+      child.geometry?.dispose();
+      if (child.material) {
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const mat of materials) {
+          for (const key in mat) {
+            if (mat[key] instanceof THREE.Texture) {
+              mat[key].dispose();
+            }
+          }
+          mat.dispose();
+        }
+      }
+    }
+  });
+}
+
+function clearBlobCache() {
+  for (const url of blobCache.values()) {
+    URL.revokeObjectURL(url);
+  }
+  blobCache.clear();
+}
 
 // --- MMD Loader 雛形 ---
 const blobCache = new Map();
@@ -734,50 +793,41 @@ async function loadPMX(pmxAbsPath) {
 
     const loader = new MMDLoader(manager);
 
-    // 既存のモデルを削除
-    const parent = state.modelRoot || state.scene;
-    for (let i = parent.children.length - 1; i >= 0; i--) {
-      const o = parent.children[i];
-      if (o.userData?.tag === 'pmx') {
-        parent.remove(o);
-        // リソースのクリーンアップ
-        if (o.traverse) {
-          o.traverse((child) => {
-            if (child.isMesh) {
-              if (child.geometry) child.geometry.dispose();
-              if (child.material) {
-                if (Array.isArray(child.material)) {
-                  child.material.forEach(mat => mat.dispose());
-                } else {
-                  child.material.dispose();
-                }
-              }
-            }
-          });
-        }
-      }
+    // 既存のモデルとBlobキャッシュをクリーンアップ
+    if (state.model) {
+      disposeModelResources(state.model);
+      const parent = state.modelRoot || state.scene;
+      parent.remove(state.model);
+      state.model = null;
     }
+    clearBlobCache();
 
     setProgress(30, 'PMXパース中');
     setStatus('PMX読み込み中');
     
-    const mesh = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('読み込みタイムアウト（30秒）'));
-      }, 30000);
+    const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'application/octet-stream' }));
+    let mesh;
+    try {
+      mesh = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('読み込みタイムアウト（30秒）'));
+        }, 30000);
 
-      loader.load(DUMMY_PMX_URL, (loadedMesh) => {
-        clearTimeout(timeout);
-        resolve(loadedMesh);
-      }, (e) => {
-        const p = Math.round((e.loaded || 0) / (e.total || 1) * 100);
-        setStatus(`読込 ${p}%`);
-        setProgress(30 + (p * 0.4), `アセット読み込み ${p}%`);
-      }, (error) => {
-        clearTimeout(timeout);
-        reject(error);
+        loader.load(DUMMY_PMX_URL, (loadedMesh) => {
+          clearTimeout(timeout);
+          resolve(loadedMesh);
+        }, (e) => {
+          const p = Math.round((e.loaded || 0) / (e.total || 1) * 100);
+          setStatus(`読込 ${p}%`);
+          setProgress(30 + (p * 0.4), `アセット読み込み ${p}%`);
+        }, (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
       });
-    });
+    } finally {
+      URL.revokeObjectURL(pmxURL);
+    }
 
     if (!mesh) {
       throw new Error('モデルの読み込みに失敗しました');
@@ -809,11 +859,6 @@ async function loadPMX(pmxAbsPath) {
 
     setProgress(100, '完了');
     setStatus('PMX読み込み完了');
-    
-    // Blob URLのクリーンアップ
-    setTimeout(() => {
-      URL.revokeObjectURL(pmxURL);
-    }, 1000);
     
     hideModal();
   } catch (e) {
@@ -1006,6 +1051,10 @@ state._grabbing = false;
 state._grabbing2 = false;
 async function initHandTracking() {
   if (inferTimer) { clearInterval(inferTimer); inferTimer = null; }
+  if (handLm) {
+    try { handLm.close(); } catch(e) { console.error('Failed to close HandLandmarker:', e); }
+    handLm = null;
+  }
   try {
     // 事前確認: パッケージ有無
     const hasVision = await api.fsExistsApp('node_modules/@mediapipe/tasks-vision/vision_bundle.mjs');
@@ -1328,7 +1377,6 @@ async function ensureModeLoop() {
       state.xrMode = 'fb';
       try { els.selXR.value = 'fb'; } catch {}
       stopXR();
-      requestAnimationFrame(tick);
       return;
     }
     await startXR();
@@ -1341,7 +1389,6 @@ async function ensureModeLoop() {
   }
   // それ以外はFB描画
   stopXR();
-  requestAnimationFrame(tick);
 }
 
 function stopXR() {
@@ -1353,12 +1400,12 @@ function stopXR() {
 }
 
 async function startXR() {
-  if (!navigator.xr) { requestAnimationFrame(tick); return; }
+  if (!navigator.xr) { return; }
   try {
     // 事前対応確認（未対応なら静かにFBへ）
     if (navigator.xr.isSessionSupported) {
       const ok = await navigator.xr.isSessionSupported('immersive-ar');
-      if (!ok) { setStatus('XR未対応: Fallbackへ切替'); stopXR(); requestAnimationFrame(tick); return; }
+      if (!ok) { setStatus('XR未対応: Fallbackへ切替'); stopXR(); return; }
     }
     const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hit-test'] });
     state.xrSession = session;
@@ -1373,52 +1420,12 @@ async function startXR() {
       state.xrSession = null; state.hitTestSource = null; if (state.reticle) { state.scene.remove(state.reticle); state.reticle = null; }
       if (state.renderer) state.renderer.xr.enabled = false;
       state.xrPlaced = false; state.xrAnchor = null;
-      requestAnimationFrame(tick);
     });
 
-    state.renderer.setAnimationLoop((t, frame) => {
-      if (!frame) return;
-      const results = state.hitTestSource ? frame.getHitTestResults(state.hitTestSource) : [];
-      if (results.length > 0) {
-        const pose = results[0].getPose(state.xrRefSpace);
-        if (pose && state.reticle) {
-          state.reticle.visible = true;
-          state.reticle.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
-          const o = pose.transform.orientation; state.reticle.quaternion.set(o.x, o.y, o.z, o.w);
-        }
-        // 掴みで設置確定（未設置時のみ）
-        if (!state.xrPlaced && !state.xrAnchor && state._grabbing && results[0].createAnchor) {
-          results[0].createAnchor().then(a => { state.xrAnchor = a; state.xrPlaced = true; }).catch(() => {});
-        }
-      } else if (state.reticle) {
-        state.reticle.visible = false;
-      }
-
-      if (state.xrAnchor) {
-        const pose = frame.getPose(state.xrAnchor.anchorSpace || state.xrAnchor, state.xrRefSpace);
-        if (pose) {
-          state.modelRoot.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
-          const o = pose.transform.orientation; state.modelRoot.quaternion.set(o.x, o.y, o.z, o.w);
-        }
-      }
-
-      // 物理ステップ（XR時）
-      if (phys.enabled && phys.world) {
-        phys.world.step(1/60);
-        if (phys.body && !state._grabbing) {
-          const b = phys.body.position; state.modelRoot.position.set(b.x, b.y, b.z);
-        } else if (phys.body && state._grabbing) {
-          const p = state.modelRoot.position; phys.body.position.set(p.x, p.y, p.z); phys.body.velocity.set(0,0,0);
-        }
-      }
-
-      state.renderer.render(state.scene, state.camera);
-    });
   } catch (e) {
     console.warn('XR開始失敗', e);
     stopXR();
     setStatus('XR開始失敗: Fallbackへ切替');
-    requestAnimationFrame(tick);
   }
 }
 
