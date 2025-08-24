@@ -31,6 +31,8 @@ html, body {
   height: 100%;
   object-fit: cover;
 }
+#bg { z-index: 0; }
+#gl { z-index: 1; }
 #hud {
   position: absolute;
   right: 8px;
