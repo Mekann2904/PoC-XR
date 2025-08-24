@@ -34,3 +34,6 @@ coverage/
 *.pid
 *.pid.lock
 
+# Project assets (exclude heavy/local test data)
+assets/
+test-models/
