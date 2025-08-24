@@ -289,6 +289,7 @@ function bindEvents() {
   const inTr = document.getElementById('in-trel');
   const inPa = document.getElementById('in-posa');
   const inRa = document.getElementById('in-rota');
+  const inSc = document.getElementById('in-scale');
   const inMin = document.getElementById('in-minc');
   const inBe = document.getElementById('in-beta');
   const inDc = document.getElementById('in-dc');
@@ -296,6 +297,7 @@ function bindEvents() {
   const valTr = document.getElementById('val-trel');
   const valPa = document.getElementById('val-posa');
   const valRa = document.getElementById('val-rota');
+  const valSc = document.getElementById('val-scale');
   const valMin = document.getElementById('val-minc');
   const valBe = document.getElementById('val-beta');
   const valDc = document.getElementById('val-dc');
@@ -314,6 +316,7 @@ function bindEvents() {
     inTr.value = g.T_release; valTr.textContent = Number(g.T_release).toFixed(3);
     inPa.value = g.posAlpha; valPa.textContent = Number(g.posAlpha).toFixed(2);
     inRa.value = g.rotAlpha; valRa.textContent = Number(g.rotAlpha).toFixed(2);
+    inSc.value = g.scaleGain; valSc.textContent = Number(g.scaleGain).toFixed(2);
     inMin.value = g.minCutoff; valMin.textContent = Number(g.minCutoff).toFixed(2);
     inBe.value = g.beta; valBe.textContent = Number(g.beta).toFixed(2);
     inDc.value = g.dCutoff; valDc.textContent = Number(g.dCutoff).toFixed(2);
@@ -330,6 +333,7 @@ function bindEvents() {
   inTr.addEventListener('input', () => { state.gesture.T_release = Number(inTr.value); valTr.textContent = Number(inTr.value).toFixed(3); });
   inPa.addEventListener('input', () => { state.gesture.posAlpha = Number(inPa.value); valPa.textContent = Number(inPa.value).toFixed(2); });
   inRa.addEventListener('input', () => { state.gesture.rotAlpha = Number(inRa.value); valRa.textContent = Number(inRa.value).toFixed(2); });
+  inSc.addEventListener('input', () => { state.gesture.scaleGain = Number(inSc.value); valSc.textContent = Number(inSc.value).toFixed(2); });
   inMin.addEventListener('input', () => { state.gesture.minCutoff = Number(inMin.value); valMin.textContent = Number(inMin.value).toFixed(2); });
   inBe.addEventListener('input', () => { state.gesture.beta = Number(inBe.value); valBe.textContent = Number(inBe.value).toFixed(2); });
   inDc.addEventListener('input', () => { state.gesture.dCutoff = Number(inDc.value); valDc.textContent = Number(inDc.value).toFixed(2); });
