@@ -8,6 +8,7 @@ const els = {
   selXR: document.getElementById('sel-xr'),
   selReso: document.getElementById('sel-reso'),
   selInfer: document.getElementById('sel-infer'),
+  selInferReso: document.getElementById('sel-infer-reso'),
   selQuality: document.getElementById('sel-quality'),
   selTexMax: document.getElementById('sel-texmax'),
   chkPhysics: document.getElementById('chk-physics'),
@@ -44,6 +45,7 @@ const state = {
   xrMode: 'auto', // auto | xr | fb
   resolution: '1080p',
   inferFps: 30,
+  inferReso: '360p', // 360p | 480p（推論用）
   hasXR: false,
   three: null,
   renderer: null,
@@ -66,6 +68,38 @@ const state = {
   lastHands: 0
 };
 state.xrPlaced = false;
+
+// 推論用キャンバス（OffscreenCanvas優先）
+let inferCanvas = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(1, 1) : null;
+let inferCtx = inferCanvas ? inferCanvas.getContext('2d') : null;
+if (!inferCanvas) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 1;
+  inferCanvas = c;
+  inferCtx = c.getContext('2d');
+}
+
+function getTargetInferHeight() {
+  switch (state.inferReso) {
+    case '480p': return 480;
+    case '360p':
+    default: return 360;
+  }
+}
+
+function ensureInferCanvasSize(videoEl) {
+  const vw = videoEl.videoWidth || videoEl.width || 0;
+  const vh = videoEl.videoHeight || videoEl.height || 0;
+  if (!vw || !vh) return { w: 0, h: 0 };
+  const th = getTargetInferHeight();
+  const w = Math.max(1, Math.round(vw * th / vh));
+  const h = th;
+  if (inferCanvas.width !== w || inferCanvas.height !== h) {
+    inferCanvas.width = w;
+    inferCanvas.height = h;
+  }
+  return { w, h };
+}
 
 function setStatus(msg) { els.status.textContent = msg; }
 function showModal(msg) { modal.root.hidden = false; modal.msg.textContent = msg; modal.errors.textContent = ''; modal.bar.style.width = '0%'; }
@@ -313,6 +347,10 @@ function bindEvents() {
     state.inferFps = Number(e.target.value);
     await api.setStore({ settings: { ...(await api.getStore('settings')), inferFps: state.inferFps } });
   });
+  els.selInferReso?.addEventListener('change', async (e) => {
+    state.inferReso = e.target.value;
+    await api.setStore({ settings: { ...(await api.getStore('settings')), inferReso: state.inferReso } });
+  });
   els.selQuality.addEventListener('change', async (e) => {
     state.quality = e.target.value;
     applyQualityPreset();
@@ -465,6 +503,7 @@ async function restoreSettings() {
   if (s.xrMode) state.xrMode = s.xrMode;
   if (s.resolution) state.resolution = s.resolution;
   if (s.inferFps) state.inferFps = s.inferFps;
+  if (s.inferReso) state.inferReso = s.inferReso;
   if (s.quality) state.quality = s.quality;
   if (typeof s.physics === 'boolean') state.physics = s.physics;
   if (typeof s.textureMax === 'number') state.textureMax = s.textureMax;
@@ -473,6 +512,7 @@ async function restoreSettings() {
   els.selXR.value = state.xrMode;
   els.selReso.value = state.resolution;
   els.selInfer.value = String(state.inferFps);
+  if (els.selInferReso) els.selInferReso.value = state.inferReso;
   els.selQuality.value = state.quality;
   els.chkPhysics.checked = state.physics;
   els.selTexMax.value = String(state.textureMax || 0);
@@ -982,9 +1022,13 @@ async function initHandTracking() {
     const t0 = performance.now();
     if (handLm && els.video.readyState >= 2) {
       try {
-        const res = handLm.detectForVideo(els.video, performance.now());
-        state.lastHands = (res?.landmarks || []).length;
-        updateFromHands(res);
+        const { w, h } = ensureInferCanvasSize(els.video);
+        if (w && h && inferCtx) {
+          inferCtx.drawImage(els.video, 0, 0, w, h);
+          const res = handLm.detectForVideo(inferCanvas, performance.now());
+          state.lastHands = (res?.landmarks || []).length;
+          updateFromHands(res);
+        }
       } catch (e) {
         // 推論失敗は継続
       }
