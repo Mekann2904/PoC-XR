@@ -60,9 +60,9 @@ function createWindow() {
   win.webContents.on('did-fail-load', (e, errorCode, errorDesc, validatedURL) => {
     console.error('did-fail-load', { errorCode, errorDesc, validatedURL });
   });
-  win.webContents.on('console-message', (e, level, message, line, sourceId) => {
+  win.webContents.on('console-message', ({ level, message, lineNumber, sourceId }) => {
     const lvl = ['log','warn','error'][Math.min(2, Math.max(0, level-1))] || 'log';
-    console[lvl](`[renderer:${lvl}]`, message, `(${sourceId}:${line})`);
+    console[lvl](`[renderer:${lvl}]`, message, `(${sourceId}:${lineNumber})`);
   });
 
   return win;
@@ -73,6 +73,12 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') return callback(true);
     return callback(false);
+  });
+
+  // Request camera permission explicitly for macOS
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (permission === 'media') return true;
+    return false;
   });
 
   const win = createWindow();
@@ -130,12 +136,52 @@ app.whenReady().then(() => {
   ipcMain.handle('fs:read', async (e, absPath) => {
     try {
       if (!allowedBaseDir) throw new Error('base not set');
-      const norm = fs.realpathSync(path.resolve(absPath));
+      const resolved = path.resolve(absPath);
+      // Check if file exists before trying to get realpath
+      if (!fs.existsSync(resolved)) {
+        throw new Error('file does not exist: ' + resolved);
+      }
+      const norm = fs.realpathSync(resolved);
       if (!norm.startsWith(allowedBaseDir)) throw new Error('out of base');
       return fs.readFileSync(norm);
     } catch (err) {
       console.error('fs:read error', err);
       return null;
+    }
+  });
+
+  const walk = (dir, allFiles = []) => {
+    const files = fs.readdirSync(dir);
+    files.forEach(file => {
+      const filePath = path.join(dir, file);
+      try {
+        const stats = fs.statSync(filePath);
+        if (stats.isDirectory()) {
+          allFiles.push(...walk(filePath, []));
+        } else {
+          allFiles.push(filePath);
+        }
+      } catch {
+        // ignore stat errors (e.g. for symlinks)
+      }
+    });
+    return allFiles;
+  };
+
+  ipcMain.handle('fs:list-files', async (e, dirPath) => {
+    try {
+      if (!allowedBaseDir) throw new Error('base not set');
+      const resolved = path.resolve(dirPath);
+      if (!fs.existsSync(resolved)) {
+        throw new Error('dir does not exist: ' + resolved);
+      }
+      const norm = fs.realpathSync(resolved);
+      if (!norm.startsWith(allowedBaseDir)) throw new Error('out of base');
+      if (!fs.statSync(norm).isDirectory()) return [];
+      return walk(norm);
+    } catch (err) {
+      console.error('fs:list-files error', err);
+      return [];
     }
   });
 

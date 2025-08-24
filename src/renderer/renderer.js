@@ -1,4 +1,4 @@
-// 設計書に基づく最小骨格（XR自動切替、カメラ、HUD、MMD読込/MediaPipe雛形）
+// 設計書に基づく最小骨格（XR自動切替、カメラ、HUD、MMD読込/MediaPipe雛形)
 import * as THREE from 'three';
 import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
 const api = window.api;
@@ -72,9 +72,12 @@ function setProgress(p, msg) { modal.bar.style.width = `${Math.max(0, Math.min(1
 function pushError(e) { modal.errors.textContent += (modal.errors.textContent ? '\n' : '') + e; }
 
 function hudRender() {
-  els.hud.innerText = `fps: ${state.fps.toFixed(0)}\n` +
-    `infer: ${state.inferFps}fps (${state.inferMs.toFixed(1)}ms)\n` +
-    `mode: ${state.xrMode}${state.hasXR ? ' (XR可)' : ' (XR不可)'}\n` +
+  els.hud.innerText = `fps: ${state.fps.toFixed(0)}
+` +
+    `infer: ${state.inferFps}fps (${state.inferMs.toFixed(1)}ms)
+` +
+    `mode: ${state.xrMode}${state.hasXR ? ' (XR可)' : ' (XR不可)'}
+` +
     (state._grabbing ? 'grab: ON' : 'grab: OFF');
   // XRヒント表示
   xrHint.hidden = !(state.xrSession && !state.xrPlaced);
@@ -204,9 +207,13 @@ function tick(ts) {
 async function handleOpen() {
   const fp = await api.openModel();
   if (!fp) return;
+  console.log('Selected file path:', fp);
   setStatus('モデル選択: ' + fp.split('/').pop());
   await refreshRecents();
-  await api.setBaseDir(fp.substring(0, fp.lastIndexOf('/')));
+  const baseDir = fp.substring(0, fp.lastIndexOf('/'));
+  console.log('Setting base directory:', baseDir);
+  const baseDirResult = await api.setBaseDir(baseDir);
+  console.log('Base directory set result:', baseDirResult);
   await loadPMX(fp);
 }
 
@@ -466,12 +473,32 @@ main();
 const blobCache = new Map();
 async function toBlobURL(absPath, mime = 'application/octet-stream') {
   if (blobCache.has(absPath)) return blobCache.get(absPath);
-  const buf = await api.fsRead(absPath);
-  if (!buf) throw new Error('読み込み失敗: ' + absPath);
-  const u8 = new Uint8Array(buf);
-  const url = URL.createObjectURL(new Blob([u8], { type: mime }));
-  blobCache.set(absPath, url);
-  return url;
+  
+  try {
+    console.log('Reading file for blob URL:', absPath);
+    const buf = await api.fsRead(absPath);
+    if (!buf) {
+      console.warn('File not found or empty:', absPath);
+      throw new Error('読み込み失敗: ' + absPath);
+    }
+    
+    const bufSize = buf.byteLength || buf.length || 0;
+    console.log('File size:', bufSize, 'bytes');
+    
+    if (bufSize === 0) {
+      console.warn('Empty file:', absPath);
+      throw new Error('空ファイル: ' + absPath);
+    }
+    
+    const u8 = new Uint8Array(buf);
+    const url = URL.createObjectURL(new Blob([u8], { type: mime }));
+    blobCache.set(absPath, url);
+    console.log('Created blob URL:', url, 'for', absPath);
+    return url;
+  } catch (e) {
+    console.error('toBlobURL error for', absPath, ':', e);
+    throw e;
+  }
 }
 
 // アプリ同梱リソースをBlob URL化
@@ -502,48 +529,56 @@ function resolveRelative(baseAbs, rel) {
 
 async function loadPMX(pmxAbsPath) {
   try {
-    // 事前検証: 拡張子/サイズ上限
-    if (!pmxAbsPath.toLowerCase().endsWith('.pmx')) {
-      pushError('非対応拡張子'); return;
-    }
-    const pmxBuf = await api.fsRead(pmxAbsPath);
-    if (!pmxBuf) { pushError('PMXファイル読込失敗'); return; }
-    const sizeMB = (pmxBuf.byteLength || pmxBuf.length || 0) / (1024*1024);
-    if (sizeMB > 200) { pushError('サイズ上限超過: ' + sizeMB.toFixed(1) + 'MB'); return; }
+    showModal('アセット準備中...');
+    setProgress(0, 'アセット準備中');
 
-    // URL変換: 依存テクスチャ等をblob:に差し替え
+    const baseDir = pmxAbsPath.substring(0, pmxAbsPath.lastIndexOf('/'));
+    const allFiles = await api.fsListFiles(baseDir);
+
+    const imageExt = ['png', 'jpg', 'jpeg', 'bmp', 'tga'];
+    const imageFiles = allFiles.filter(p => {
+      const ext = p.split('.').pop()?.toLowerCase();
+      return imageExt.includes(ext);
+    });
+    const imagePromises = imageFiles.map(p => {
+      const ext = p.split('.').pop()?.toLowerCase();
+      return toBlobURL(p, `image/${ext}`);
+    });
+    await Promise.all(imagePromises);
+    console.log(`${imageFiles.length} texture files cached.`);
+
+    const pmxBuf = await api.fsRead(pmxAbsPath);
+    if (!pmxBuf) { throw new Error('PMXファイル読込失敗'); }
+
+    const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'application/octet-stream' }));
+    const DUMMY_PMX_URL = 'dummy.pmx';
+
     const manager = new THREE.LoadingManager();
     manager.setURLModifier((url) => {
-      try {
-        let relLike = null;
-        if (url.startsWith('blob:file:')) {
-          // 例: blob:file:///tex\face.png → 相対パスとして扱う
-          relLike = url.replace(/^blob:file:\/\//, '');
-        }
-        const normUrl = (relLike || url).replace(/\\/g, '/');
-        const abs = (normUrl.startsWith('blob:') || normUrl.startsWith('data:'))
-          ? normUrl
-          : resolveRelative(pmxAbsPath, normUrl);
-        if (abs.startsWith('blob:') || abs.startsWith('data:')) return abs;
-        // 画像系MIMEは簡易推定
-        const ext = abs.split('.').pop()?.toLowerCase();
-        const mime = ext === 'png' ? 'image/png' : (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : (ext === 'bmp' ? 'image/bmp' : 'application/octet-stream');
-        // キャッシュがあれば即返し、無ければ裏で生成しつつプレースホルダ
-        const cached = blobCache.get(abs);
-        if (cached) return cached;
-        toBlobURL(abs, mime).catch(() => pushError('依存読み込み失敗: ' + abs));
-        return (mime.startsWith('image/')) ? placeholderDataURL() : 'data:application/octet-stream;base64,';
-      } catch (e) {
-        console.warn('URL変換失敗:', url, e);
+      if (url === DUMMY_PMX_URL) {
+        return pmxURL;
+      }
+      if (url.startsWith('data:')) {
         return url;
       }
+
+      let relPath = decodeURIComponent(url.replace(/\\/g, '/'));
+      if (relPath.startsWith('blob:file:///')) {
+        relPath = relPath.substring('blob:file:///'.length);
+      }
+
+      const absolutePath = resolveRelative(pmxAbsPath, relPath);
+
+      if (blobCache.has(absolutePath)) {
+        return blobCache.get(absolutePath);
+      }
+
+      console.warn(`Texture not in cache, but requested: ${absolutePath} (from: ${url})`);
+      return placeholderDataURL();
     });
 
     const loader = new MMDLoader(manager);
-    showModal('PMX読み込み開始');
-    const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'model/pmx' }));
 
-    // 既存モデルをクリア
     const parent = state.modelRoot || state.scene;
     for (let i = parent.children.length - 1; i >= 0; i--) {
       const o = parent.children[i];
@@ -552,21 +587,24 @@ async function loadPMX(pmxAbsPath) {
 
     setStatus('PMX読み込み中');
     const mesh = await new Promise((resolve, reject) => {
-      loader.load(pmxURL, resolve, (e) => {
-        const p = Math.round((e.loaded||0)/(e.total||1)*100);
+      loader.load(DUMMY_PMX_URL, resolve, (e) => {
+        const p = Math.round((e.loaded || 0) / (e.total || 1) * 100);
         setStatus(`読込 ${p}%`);
         setProgress(p, `アセット読み込み ${p}%`);
-      }, (err) => {
-        pushError('PMX読込エラー'); reject(err);
-      });
+      }, reject);
     });
+
     mesh.userData.tag = 'pmx';
     autoPlace(mesh);
     state.modelRoot.add(mesh);
     state.model = mesh;
+
+    console.log('Model added to scene at position:', state.modelRoot.position);
+    console.log('Model scale:', mesh.scale);
+    console.log('Camera position:', state.camera.position);
+
     applyQualityPreset();
     if (state.physics) { await ensurePhysics(); updatePhysicsBodyFromModel(); }
-    // テクスチャ縮小
     if (state.textureMax && state.textureMax > 0) {
       setProgress(0, 'テクスチャ縮小');
       await downsampleModelTextures(state.model, state.textureMax);
@@ -584,15 +622,45 @@ async function loadPMX(pmxAbsPath) {
 function autoPlace(obj) {
   const box = new THREE.Box3().setFromObject(obj);
   const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
   box.getSize(size);
-  const targetScreenRatio = 0.35;
-  const cam = state.camera;
-  const dist = 1.5; // 仮固定
-  cam.position.set(0, 1.3, dist);
-  cam.lookAt(0, 1.2, 0);
-  const scale = size.y > 0 ? (targetScreenRatio * 2.0) / size.y : 1.0;
+  box.getCenter(center);
+  
+  console.log('Model bounding box size:', size.x, size.y, size.z);
+  console.log('Model center:', center.x, center.y, center.z);
+  
+  // モデルを原点に移動（バウンディングボックスの中心を基準）
+  obj.position.copy(center).negate();
+  
+  // 適切なスケールを計算（画面の30%程度になるように、より小さめに）
+  const targetScreenRatio = 0.3;
+  const maxDimension = Math.max(size.x, size.y, size.z);
+  const scale = maxDimension > 0 ? targetScreenRatio / maxDimension : 1.0;
   obj.scale.setScalar(scale);
-  obj.position.set(0, 0, 0);
+  filt.scale = scale; // スケール変更の基準値を設定
+  
+  // モデルルートを初期位置に配置（画面中央、少し下に）
+  state.modelRoot.position.set(0, -0.2, 0);
+
+  // カメラ位置を調整（モデル全体が見えるように、少し上から見下ろす）
+  const cam = state.camera;
+  const distance = Math.max(3.0, maxDimension * scale * 4.0);
+  const modelCenter = state.modelRoot.position;
+
+  cam.position.set(
+    modelCenter.x,
+    modelCenter.y + size.y * scale * 0.5, // 少し上から
+    modelCenter.z + distance
+  );
+  cam.lookAt(modelCenter);
+  
+  // カメラの描画範囲を調整
+  cam.far = distance * 2;
+  cam.updateProjectionMatrix();
+  
+  console.log('Applied scale:', scale);
+  console.log('Camera distance:', distance);
+  console.log('Final model position:', obj.position.x, obj.position.y, obj.position.z);
 }
 
 function placeholderDataURL() {
@@ -712,6 +780,8 @@ function updatePhysicsBodyFromModel() {
   phys.body.position.set(p.x, p.y || (half.y + 0.01), p.z);
 }
 let pinchBaseline = null;
+let pinchScaleBaseline = null;
+let rollScaleBaseline = null;
 let yawPrev = null;
 // 擬似Z用（片手ピンチ強度→Z平面）
 let pinchZBaseline = null;
@@ -733,14 +803,10 @@ async function initHandTracking() {
     const modelBuf = await api.fsReadApp('assets/hand_landmarker.task');
     if (!modelBuf) { if (assetHint) assetHint.hidden = false; throw new Error('モデル未配置: assets/hand_landmarker.task'); }
 
-    // 絶対file://URLに解決（CSPでworker-src 'self'許可済み）
-    const baseHref = window.location.href;
-    const wasmLoaderUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js', baseHref).toString();
-    const wasmBinaryUrl = new URL('../../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm', baseHref).toString();
-    const fileset = await vision.FilesetResolver.forVisionTasks({
-      wasmLoaderPath: wasmLoaderUrl,
-      wasmBinaryPath: wasmBinaryUrl
-    });
+    // 正しいWASMパスでFilesetResolverを作成
+    const fileset = await vision.FilesetResolver.forVisionTasks(
+      "../../node_modules/@mediapipe/tasks-vision/wasm/"
+    );
     handLm = await vision.HandLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetBuffer: new Uint8Array(modelBuf)
@@ -799,41 +865,31 @@ function updateFromHands(result) {
     state._grabbing2 = false;
   }
 
-  // 位置/回転（片手）+ 擬似Z（片手ピンチ強度）
-  if (state._grabbing && h0) {
+  // --- 操作 ---
+  if (h0) {
     const c = handCenter(h0);
     const yaw = handYaw(h0);
-    // 擬似Z更新（両手グラブ時はスケール優先のため無効化）
-    if (!state._grabbing2) {
-      const d0z = pinchDistance(h0);
-      if (pinchZBaseline == null) { pinchZBaseline = d0z; fbZGrabStart = state.fbZ; }
-      const ratio = Math.max(0.2, Math.min(5.0, d0z / Math.max(1e-5, pinchZBaseline)));
-      const targetZ = Math.max(state.fbZMin, Math.min(state.fbZMax, fbZGrabStart + 0.5 * (1 - ratio)));
-      const dt = Math.max(1e-3, state.inferMs / 1000);
-      if (state.gesture.filter === 'oneeuro') {
-        oneZPlane ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-        state.fbZ = oneZPlane.filter(targetZ, dt);
-      } else {
-        state.fbZ = state.fbZ + (targetZ - state.fbZ) * state.gesture.posAlpha;
-      }
-    } else {
-      pinchZBaseline = null;
-    }
-    const pt = screenToWorld(c.x, c.y, state.fbZ);
     const dt = Math.max(1e-3, state.inferMs / 1000);
-    if (pt) {
-      if (state.gesture.filter === 'oneeuro') {
-        onePosX ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-        onePosY ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-        onePosZ ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-        const x = onePosX.filter(pt.x, dt), y = onePosY.filter(pt.y, dt), z = onePosZ.filter(pt.z, dt);
-        filt.pos.set(x, y, z);
-      } else {
-        filt.pos.lerp(pt, state.gesture.posAlpha);
+
+    // --- 移動 (片手ピンチ時) ---
+    if (state._grabbing && !state._grabbing2) {
+      const pt = screenToWorld(c.x, c.y, 0);
+      if (pt) {
+        if (state.gesture.filter === 'oneeuro') {
+          onePosX ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+          onePosY ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+          onePosZ ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+          const x = onePosX.filter(pt.x, dt), y = onePosY.filter(pt.y, dt), z = onePosZ.filter(pt.z, dt);
+          filt.pos.set(x, y, z);
+        } else {
+          filt.pos.lerp(pt, state.gesture.posAlpha);
+        }
+        state.modelRoot.position.copy(filt.pos);
       }
-      state.modelRoot.position.copy(filt.pos);
     }
-    if (isFinite(yaw)) {
+    
+    // --- 回転 (片手ピンチ時) ---
+    if (state._grabbing && isFinite(yaw)) {
       if (state.gesture.filter === 'oneeuro') {
         oneYaw ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
         const y = oneYaw.filter(yaw, dt);
@@ -846,19 +902,45 @@ function updateFromHands(result) {
     }
   } else {
     yawPrev = null;
-    pinchZBaseline = null;
   }
 
-  // スケール（両手）
+  // --- スケール調整 ---
   if (state._grabbing && state._grabbing2 && h0 && h1 && state.model) {
+    // --- 両手スケール ---
     const c0 = handCenter(h0), c1 = handCenter(h1);
     const dist = Math.hypot(c0.x - c1.x, c0.y - c1.y);
-    if (pinchBaseline == null) pinchBaseline = dist;
-    const target = Math.max(0.2, Math.min(5.0, 1.0 * (dist / Math.max(1e-5, pinchBaseline))));
-    filt.scale = filt.scale + (target - filt.scale) * (state.gesture.filter === 'oneeuro' ? 0.3 : state.gesture.posAlpha);
+    if (pinchBaseline == null) {
+      pinchBaseline = { dist: dist, scale: state.model.scale.x };
+    }
+    const target = Math.max(0.2, Math.min(5.0, pinchBaseline.scale * (dist / Math.max(1e-5, pinchBaseline.dist))));
+    filt.scale = filt.scale + (target - filt.scale) * state.gesture.posAlpha;
     state.model.scale.setScalar(filt.scale);
+    
+    rollScaleBaseline = null; // 他のジェスチャーの基準はリセット
+
+  } else if (!state._grabbing && h0 && state.model) {
+    // --- 片手開きロールスケール ---
+    const roll = handRoll(h0);
+    if (rollScaleBaseline === null) {
+        rollScaleBaseline = { initialRoll: roll, initialScale: state.model.scale.x };
+    }
+    
+    let deltaRoll = roll - rollScaleBaseline.initialRoll;
+    if (deltaRoll > Math.PI) deltaRoll -= 2 * Math.PI;
+    if (deltaRoll < -Math.PI) deltaRoll += 2 * Math.PI;
+
+    const scaleFactor = 1 - deltaRoll * 1.0; // Sensitivity (inverted)
+    const targetScale = rollScaleBaseline.initialScale * scaleFactor;
+    const newScale = Math.max(0.1, Math.min(10.0, targetScale));
+    
+    filt.scale = filt.scale + (newScale - filt.scale) * state.gesture.posAlpha;
+    state.model.scale.setScalar(filt.scale);
+
+    pinchBaseline = null; // 他のジェスチャーの基準はリセット
   } else {
+    // スケールジェスチャーが行われていない場合はリセット
     pinchBaseline = null;
+    rollScaleBaseline = null;
   }
 }
 
@@ -995,4 +1077,5 @@ function createReticle() {
 function pinchDistance(h) { const a = h[4], b = h[8]; return Math.hypot(a.x - b.x, a.y - b.y); }
 function handCenter(h) { const cx = (h[0].x + h[5].x + h[17].x) / 3; const cy = (h[0].y + h[5].y + h[17].y) / 3; return { x: cx, y: cy }; }
 function handYaw(h) { const a = h[0], b = h[9]; const vx = b.x - a.x, vy = b.y - a.y; return Math.atan2(-vx, -vy); }
+function handRoll(h) { const p1 = h[5], p2 = h[17]; const vx = p2.x - p1.x, vy = p2.y - p1.y; return Math.atan2(vy, vx); }
 function lerpAngle(a, b, t) { let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI; return a + d * t; }
