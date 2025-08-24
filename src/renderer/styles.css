@@ -31,54 +31,73 @@ html, body {
   height: 100%;
   object-fit: cover;
 }
+#bg {
+  z-index: 1;
+  transform: scaleX(-1); /* 左右反転でミラーモードに */
+}
+#gl {
+  z-index: 2;
+  pointer-events: none;
+}
 #hud {
   position: absolute;
   right: 8px;
   top: 8px;
-  background: rgba(0,0,0,0.5);
+  background: rgba(0,0,0,0.7);
   padding: 6px 8px;
   font-size: 12px;
   border-radius: 6px;
+  z-index: 10;
+  pointer-events: none;
 }
 #asset-hint {
   position: absolute;
   left: 50%;
   top: 52px;
   transform: translateX(-50%);
-  background: rgba(255, 87, 34, 0.85);
+  background: rgba(255, 87, 34, 0.9);
   color: #fff;
   padding: 6px 10px;
   border-radius: 8px;
   font-size: 12px;
-  z-index: 10;
+  z-index: 15;
+  pointer-events: none;
 }
-#status { margin-left: auto; font-size: 12px; opacity: 0.8; }
+#status { 
+  margin-left: auto; 
+  font-size: 12px; 
+  opacity: 0.8; 
+}
 #xr-hint {
   position: absolute;
   left: 50%;
   bottom: 20px;
   transform: translateX(-50%);
-  background: rgba(0,0,0,0.6);
+  background: rgba(0,0,0,0.8);
   padding: 6px 10px;
   border-radius: 8px;
   font-size: 12px;
+  z-index: 10;
+  pointer-events: none;
 }
 #drop-hint {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(0,0,0,0.45);
+  background: rgba(0,0,0,0.6);
   font-size: 16px;
   pointer-events: none;
+  z-index: 20;
 }
 
 #modal {
   position: absolute;
   inset: 0;
-  background: rgba(0,0,0,0.55);
+  background: rgba(0,0,0,0.7);
   display: grid;
   place-items: center;
+  z-index: 100;
 }
 #modal .panel {
   width: min(480px, 90vw);
@@ -96,9 +115,10 @@ html, body {
 #gest-panel {
   position: absolute;
   inset: 0;
-  background: rgba(0,0,0,0.55);
+  background: rgba(0,0,0,0.7);
   display: grid;
   place-items: center;
+  z-index: 100;
 }
 #gest-panel .panel {
   width: min(520px, 90vw);
@@ -113,7 +133,14 @@ html, body {
 #gest-panel label { font-size: 12px; opacity: 0.9; }
 #gest-panel input[type=range] { width: 240px; }
 
-#verify-panel { position: absolute; inset: 0; background: rgba(0,0,0,0.55); display: grid; place-items: center; }
+#verify-panel { 
+  position: absolute; 
+  inset: 0; 
+  background: rgba(0,0,0,0.7); 
+  display: grid; 
+  place-items: center; 
+  z-index: 100; 
+}
 #verify-panel .panel { width: min(420px, 90vw); background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
 #verify-panel .row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; margin-top: 8px; }
 #verify-panel .row.end { grid-template-columns: auto; justify-content: end; }

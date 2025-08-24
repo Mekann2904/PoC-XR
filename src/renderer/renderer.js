@@ -74,11 +74,27 @@ function setProgress(p, msg) { modal.bar.style.width = `${Math.max(0, Math.min(1
 function pushError(e) { modal.errors.textContent += (modal.errors.textContent ? '\n' : '') + e; }
 
 function hudRender() {
+  const gestureMode = gestureState?.currentMode || 'none';
+  const modeDisplay = {
+    'none': '待機中',
+    'move': '移動中',
+    'rotate': '回転中', 
+    'scale': 'スケール中',
+    'camera': 'カメラ操作',
+    'reset': 'リセット待機',
+    'point': 'ポイント',
+    'special': '特殊操作'
+  };
+  
   els.hud.innerText = `fps: ${state.fps.toFixed(0)}
 ` +
     `infer: ${state.inferFps}fps (${state.inferMs.toFixed(1)}ms)
 ` +
     `mode: ${state.xrMode}${state.hasXR ? ' (XR可)' : ' (XR不可)'}
+` +
+    `hands: ${state.lastHands || 0}
+` +
+    `gesture: ${modeDisplay[gestureMode] || gestureMode}
 ` +
     (state._grabbing ? 'grab: ON' : 'grab: OFF');
   // XRヒント表示
@@ -126,26 +142,62 @@ async function startCamera() {
 
 async function initThree() {
   if (state.renderer) return;
-  state.renderer = new THREE.WebGLRenderer({ canvas: els.canvas, antialias: true, alpha: true });
+  
+  // レンダラーの初期化
+  state.renderer = new THREE.WebGLRenderer({ 
+    canvas: els.canvas, 
+    antialias: true, 
+    alpha: true,
+    premultipliedAlpha: false 
+  });
   state.renderer.setPixelRatio(window.devicePixelRatio);
+  state.renderer.outputColorSpace = THREE.SRGBColorSpace;
+  state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  state.renderer.toneMappingExposure = 1.0;
+  
   resize();
+  
+  // シーンとカメラの初期化
   state.scene = new THREE.Scene();
-  state.camera = new THREE.PerspectiveCamera(60, els.canvas.clientWidth / els.canvas.clientHeight, 0.01, 20);
-  state.lightHemi = new THREE.HemisphereLight(0xffffff, 0x222233, 1.0);
+  state.scene.background = null; // 透明背景を維持
+  
+  state.camera = new THREE.PerspectiveCamera(
+    50, // より自然な視野角
+    els.canvas.clientWidth / els.canvas.clientHeight, 
+    0.1, 
+    100
+  );
+  
+  // 初期カメラ位置（モデル読み込み前の適当な位置）
+  state.camera.position.set(0, 1.6, 5);
+  state.camera.lookAt(0, 1, 0);
+  
+  // 照明の設定
+  state.lightHemi = new THREE.HemisphereLight(0xffffff, 0x444455, 0.8);
   state.scene.add(state.lightHemi);
-  state.lightDir = new THREE.DirectionalLight(0xffffff, 0.6);
-  state.lightDir.position.set(2, 4, 2);
+  
+  state.lightDir = new THREE.DirectionalLight(0xffffff, 0.8);
+  state.lightDir.position.set(2, 4, 3);
   state.lightDir.castShadow = true;
-  state.lightDir.shadow.mapSize.set(1024, 1024);
+  state.lightDir.shadow.mapSize.set(2048, 2048);
+  state.lightDir.shadow.camera.near = 0.5;
+  state.lightDir.shadow.camera.far = 50;
+  state.lightDir.shadow.camera.left = -10;
+  state.lightDir.shadow.camera.right = 10;
+  state.lightDir.shadow.camera.top = 10;
+  state.lightDir.shadow.camera.bottom = -10;
   state.scene.add(state.lightDir);
+  
+  // 地面の追加
   state.ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(20, 20),
-    new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.25 })
+    new THREE.PlaneGeometry(50, 50),
+    new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.3 })
   );
   state.ground.rotation.x = -Math.PI / 2;
   state.ground.receiveShadow = true;
   state.scene.add(state.ground);
-  // モデルの親（XRアンカー/FB位置を集約）
+  
+  // モデルの親グループ（XRアンカー/FB位置を集約）
   state.modelRoot = new THREE.Group();
   state.scene.add(state.modelRoot);
 }
@@ -198,7 +250,19 @@ function tick(ts) {
     }
   }
 
+  // レンダリング（非XR時）
   if (!state.xrSession && state.renderer && state.scene && state.camera) {
+    // キャンバスのサイズが変更されている場合の対応
+    const canvas = state.renderer.domElement;
+    const displayWidth = canvas.clientWidth;
+    const displayHeight = canvas.clientHeight;
+    
+    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+      state.renderer.setSize(displayWidth, displayHeight, false);
+      state.camera.aspect = displayWidth / displayHeight;
+      state.camera.updateProjectionMatrix();
+    }
+    
     state.renderer.render(state.scene, state.camera);
   }
 
@@ -538,23 +602,45 @@ async function loadPMX(pmxAbsPath) {
     showModal('アセット準備中...');
     setProgress(0, 'アセット準備中');
 
+    // パスの検証
+    if (!pmxAbsPath || !pmxAbsPath.toLowerCase().endsWith('.pmx')) {
+      throw new Error('無効なPMXファイルパス');
+    }
+
     const baseDir = pmxAbsPath.substring(0, pmxAbsPath.lastIndexOf('/'));
     const allFiles = await api.fsListFiles(baseDir);
 
+    if (!allFiles || allFiles.length === 0) {
+      console.warn('No files found in base directory:', baseDir);
+    }
+
+    // テクスチャファイルのキャッシュ
     const imageExt = ['png', 'jpg', 'jpeg', 'bmp', 'tga'];
     const imageFiles = allFiles.filter(p => {
       const ext = p.split('.').pop()?.toLowerCase();
       return imageExt.includes(ext);
     });
-    const imagePromises = imageFiles.map(p => {
-      const ext = p.split('.').pop()?.toLowerCase();
-      return toBlobURL(p, `image/${ext}`);
-    });
-    await Promise.all(imagePromises);
-    console.log(`${imageFiles.length} texture files cached.`);
+    
+    if (imageFiles.length > 0) {
+      setProgress(10, 'テクスチャキャッシュ中');
+      const imagePromises = imageFiles.map(async (p) => {
+        try {
+          const ext = p.split('.').pop()?.toLowerCase();
+          return await toBlobURL(p, `image/${ext}`);
+        } catch (err) {
+          console.warn('Failed to cache texture:', p, err);
+          return null;
+        }
+      });
+      await Promise.all(imagePromises);
+      console.log(`${imageFiles.length} texture files cached.`);
+    }
 
+    setProgress(20, 'PMXファイル読み込み中');
     const pmxBuf = await api.fsRead(pmxAbsPath);
-    if (!pmxBuf) { throw new Error('PMXファイル読込失敗'); }
+    if (!pmxBuf) { 
+      throw new Error('PMXファイル読込失敗: ファイルが見つからないか、読み込み権限がありません'); 
+    }
 
     const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'application/octet-stream' }));
     const DUMMY_PMX_URL = 'dummy.pmx';
@@ -579,49 +665,104 @@ async function loadPMX(pmxAbsPath) {
         return blobCache.get(absolutePath);
       }
 
-      console.warn(`Texture not in cache, but requested: ${absolutePath} (from: ${url})`);
+      console.warn(`Texture not in cache, using placeholder: ${absolutePath} (from: ${url})`);
       return placeholderDataURL();
     });
 
     const loader = new MMDLoader(manager);
 
+    // 既存のモデルを削除
     const parent = state.modelRoot || state.scene;
     for (let i = parent.children.length - 1; i >= 0; i--) {
       const o = parent.children[i];
-      if (o.userData?.tag === 'pmx') parent.remove(o);
+      if (o.userData?.tag === 'pmx') {
+        parent.remove(o);
+        // リソースのクリーンアップ
+        if (o.traverse) {
+          o.traverse((child) => {
+            if (child.isMesh) {
+              if (child.geometry) child.geometry.dispose();
+              if (child.material) {
+                if (Array.isArray(child.material)) {
+                  child.material.forEach(mat => mat.dispose());
+                } else {
+                  child.material.dispose();
+                }
+              }
+            }
+          });
+        }
+      }
     }
 
+    setProgress(30, 'PMXパース中');
     setStatus('PMX読み込み中');
+    
     const mesh = await new Promise((resolve, reject) => {
-      loader.load(DUMMY_PMX_URL, resolve, (e) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('読み込みタイムアウト（30秒）'));
+      }, 30000);
+
+      loader.load(DUMMY_PMX_URL, (loadedMesh) => {
+        clearTimeout(timeout);
+        resolve(loadedMesh);
+      }, (e) => {
         const p = Math.round((e.loaded || 0) / (e.total || 1) * 100);
         setStatus(`読込 ${p}%`);
-        setProgress(p, `アセット読み込み ${p}%`);
-      }, reject);
+        setProgress(30 + (p * 0.4), `アセット読み込み ${p}%`);
+      }, (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
     });
 
+    if (!mesh) {
+      throw new Error('モデルの読み込みに失敗しました');
+    }
+
+    setProgress(80, 'モデル配置中');
     mesh.userData.tag = 'pmx';
     autoPlace(mesh);
     state.modelRoot.add(mesh);
     state.model = mesh;
 
-    console.log('Model added to scene at position:', state.modelRoot.position);
-    console.log('Model scale:', mesh.scale);
-    console.log('Camera position:', state.camera.position);
+    console.log('Model successfully loaded:');
+    console.log('  - Position:', state.modelRoot.position);
+    console.log('  - Scale:', mesh.scale);
+    console.log('  - Camera:', state.camera.position);
 
+    setProgress(90, '品質設定適用中');
     applyQualityPreset();
-    if (state.physics) { await ensurePhysics(); updatePhysicsBodyFromModel(); }
+    
+    if (state.physics) { 
+      await ensurePhysics(); 
+      updatePhysicsBodyFromModel(); 
+    }
+    
     if (state.textureMax && state.textureMax > 0) {
-      setProgress(0, 'テクスチャ縮小');
+      setProgress(95, 'テクスチャ縮小');
       await downsampleModelTextures(state.model, state.textureMax);
     }
+
+    setProgress(100, '完了');
     setStatus('PMX読み込み完了');
+    
+    // Blob URLのクリーンアップ
+    setTimeout(() => {
+      URL.revokeObjectURL(pmxURL);
+    }, 1000);
+    
     hideModal();
   } catch (e) {
-    console.error(e);
-    setStatus('PMX読み込み失敗');
+    console.error('PMX loading error:', e);
+    setStatus('PMX読み込み失敗: ' + (e?.message || String(e)));
     showModal('読み込み失敗');
     pushError(String(e?.message || e));
+    
+    // エラー時もモーダルは適切な時間で閉じる
+    setTimeout(() => {
+      hideModal();
+    }, 5000);
   }
 }
 
@@ -635,38 +776,43 @@ function autoPlace(obj) {
   console.log('Model bounding box size:', size.x, size.y, size.z);
   console.log('Model center:', center.x, center.y, center.z);
   
-  // モデルを原点に移動（バウンディングボックスの中心を基準）
-  obj.position.copy(center).negate();
+  // モデルを原点に移動（バウンディングボックスの底面の中心を基準に）
+  obj.position.set(-center.x, -box.min.y, -center.z);
   
-  // 適切なスケールを計算（画面の30%程度になるように、より小さめに）
-  const targetScreenRatio = 0.3;
+  // 適切なスケールを計算（画面の40%程度になるように調整）
+  const targetScreenRatio = 0.4;
   const maxDimension = Math.max(size.x, size.y, size.z);
   const scale = maxDimension > 0 ? targetScreenRatio / maxDimension : 1.0;
   obj.scale.setScalar(scale);
   filt.scale = scale; // スケール変更の基準値を設定
   
-  // モデルルートを初期位置に配置（画面中央、少し下に）
-  state.modelRoot.position.set(0, -0.2, 0);
+  // モデルルートを初期位置に配置（画面中央、地面に立つように）
+  state.modelRoot.position.set(0, 0, 0);
+  state.modelRoot.rotation.set(0, 0, 0);
 
-  // カメラ位置を調整（モデル全体が見えるように、少し上から見下ろす）
+  // カメラ位置を適切に調整
   const cam = state.camera;
-  const distance = Math.max(3.0, maxDimension * scale * 4.0);
-  const modelCenter = state.modelRoot.position;
-
-  cam.position.set(
-    modelCenter.x,
-    modelCenter.y + size.y * scale * 0.5, // 少し上から
-    modelCenter.z + distance
-  );
-  cam.lookAt(modelCenter);
+  const scaledHeight = size.y * scale;
+  const scaledMaxDim = maxDimension * scale;
+  
+  // カメラの距離は、モデル全体が見えるように計算
+  const fov = cam.fov * Math.PI / 180; // ラジアンに変換
+  const distance = Math.max(3.0, scaledMaxDim / (2 * Math.tan(fov / 2)) * 1.5);
+  
+  // カメラをモデルの少し前方、やや上から見下ろす位置に配置
+  cam.position.set(0, scaledHeight * 0.6, distance);
+  cam.lookAt(new THREE.Vector3(0, scaledHeight * 0.5, 0));
   
   // カメラの描画範囲を調整
-  cam.far = distance * 2;
+  cam.near = Math.max(0.1, distance * 0.1);
+  cam.far = Math.max(20, distance * 3);
   cam.updateProjectionMatrix();
   
   console.log('Applied scale:', scale);
   console.log('Camera distance:', distance);
+  console.log('Camera position:', cam.position.x, cam.position.y, cam.position.z);
   console.log('Final model position:', obj.position.x, obj.position.y, obj.position.z);
+  console.log('Model root position:', state.modelRoot.position.x, state.modelRoot.position.y, state.modelRoot.position.z);
 }
 
 function placeholderDataURL() {
@@ -849,13 +995,222 @@ async function initHandTracking() {
   }, period);
 }
 
+// 操作状態の管理
+const gestureState = {
+  currentMode: 'none', // 'move', 'rotate', 'scale', 'camera'
+  lastMode: 'none',
+  modeStartTime: 0,
+  handsHistory: [],
+  gestureConfidence: 0
+};
+
 function updateFromHands(result) {
   if (!state.modelRoot) return;
   const hands = result?.landmarks || [];
   const h0 = hands[0];
   const h1 = hands[1];
-  const T_grab = state.gesture.T_grab, T_release = state.gesture.T_release;
+  const dt = Math.max(1e-3, state.inferMs / 1000);
 
+  // 手の検出情報を履歴に追加（安定性向上のため）
+  gestureState.handsHistory.push({ h0, h1, timestamp: performance.now() });
+  if (gestureState.handsHistory.length > 5) {
+    gestureState.handsHistory.shift();
+  }
+
+  // ジェスチャー認識と操作モード決定
+  const newMode = determineGestureMode(h0, h1);
+  if (newMode !== gestureState.currentMode) {
+    gestureState.lastMode = gestureState.currentMode;
+    gestureState.currentMode = newMode;
+    gestureState.modeStartTime = performance.now();
+    console.log(`Gesture mode changed: ${gestureState.lastMode} -> ${gestureState.currentMode}`);
+  }
+
+  // 操作の実行
+  executeGestureOperation(h0, h1, dt);
+  
+  // 状態の更新（レガシー互換）
+  updateLegacyGrabState(h0, h1);
+}
+
+function determineGestureMode(h0, h1) {
+  if (!h0) return 'none';
+  
+  // 両手が検出されている場合
+  if (h0 && h1) {
+    const isPinchBoth = pinchDistance(h0) < state.gesture.T_grab && 
+                       pinchDistance(h1) < state.gesture.T_grab;
+    const isOpenBoth = isOpenPalmGesture(h0) && isOpenPalmGesture(h1);
+    const distance = getHandDistance(h0, h1);
+    
+    if (isPinchBoth && distance > 0.3) {
+      return 'scale'; // 両手ピンチで離れている = スケール
+    } else if (isOpenBoth) {
+      return 'camera'; // 両手パー = カメラ操作
+    } else if (isPinchBoth) {
+      return 'rotate'; // 両手ピンチで近い = 回転
+    }
+  }
+  
+  // 片手の場合
+  if (h0) {
+    const isPinch = pinchDistance(h0) < state.gesture.T_grab;
+    const isPointing = isPointingGesture(h0);
+    const isOpenPalm = isOpenPalmGesture(h0);
+    const isFist = isFistGesture(h0);
+    const isPeace = isPeaceSignGesture(h0);
+    
+    if (isPinch) {
+      return 'move'; // ピンチ = 移動
+    } else if (isPointing) {
+      return 'point'; // 指差し = ポイント（将来的な機能用）
+    } else if (isFist) {
+      return 'reset'; // グー = リセット
+    } else if (isPeace) {
+      return 'special'; // ピース = 特殊操作
+    }
+  }
+  
+  return 'none';
+}
+
+function executeGestureOperation(h0, h1, dt) {
+  const mode = gestureState.currentMode;
+  
+  switch (mode) {
+    case 'move':
+      handleMoveGesture(h0, dt);
+      break;
+    case 'rotate':
+      handleRotateGesture(h0, h1, dt);
+      break;
+    case 'scale':
+      handleScaleGesture(h0, h1, dt);
+      break;
+    case 'camera':
+      handleCameraGesture(h0, h1, dt);
+      break;
+    case 'reset':
+      handleResetGesture(h0);
+      break;
+    case 'special':
+      handleSpecialGesture(h0, dt);
+      break;
+    default:
+      // 何もしない
+      break;
+  }
+}
+
+function handleMoveGesture(h0, dt) {
+  // ピンチの中心点を使用（より正確な操作点）
+  const pinchCenter = getPinchCenter(h0);
+  const pt = screenToWorld(pinchCenter.x, pinchCenter.y, 0);
+  if (pt) {
+    if (state.gesture.filter === 'oneeuro') {
+      onePosX ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+      onePosY ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+      onePosZ ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+      const x = onePosX.filter(pt.x, dt), y = onePosY.filter(pt.y, dt), z = onePosZ.filter(pt.z, dt);
+      filt.pos.set(x, y, z);
+    } else {
+      filt.pos.lerp(pt, state.gesture.posAlpha * 1.2); // 移動時は適度に敏感に
+    }
+    state.modelRoot.position.copy(filt.pos);
+  }
+}
+
+function handleRotateGesture(h0, h1, dt) {
+  // 両手のピンチ中心を使った回転
+  const c0 = getPinchCenter(h0);
+  const c1 = getPinchCenter(h1);
+  const centerX = (c0.x + c1.x) / 2;
+  const angle = Math.atan2(c1.y - c0.y, c1.x - c0.x);
+  
+  if (state.gesture.filter === 'oneeuro') {
+    oneYaw ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
+    const y = oneYaw.filter(angle, dt);
+    filt.rotY = y;
+  } else {
+    filt.rotY = lerpAngle(filt.rotY, angle, state.gesture.rotAlpha * 0.8); // 回転は少し控えめに
+  }
+  state.modelRoot.rotation.y = filt.rotY;
+}
+
+function handleScaleGesture(h0, h1, dt) {
+  // 両手のピンチ中心間の距離からスケールを計算
+  const c0 = getPinchCenter(h0);
+  const c1 = getPinchCenter(h1);
+  const distance = Math.hypot(c1.x - c0.x, c1.y - c0.y);
+  
+  if (!pinchScaleBaseline) {
+    pinchScaleBaseline = distance;
+    return;
+  }
+  
+  const scaleRatio = distance / pinchScaleBaseline;
+  const targetScale = Math.max(0.1, Math.min(10.0, filt.scale * scaleRatio));
+  
+  // スケール変更は滑らかに
+  filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha * 0.3;
+  if (state.model) {
+    state.model.scale.setScalar(filt.scale);
+  }
+  
+  pinchScaleBaseline = distance; // 基準を更新
+}
+
+function handleCameraGesture(h0, h1, dt) {
+  // 両手でカメラを操作（将来的な機能）
+  const c0 = handCenter(h0);
+  const c1 = handCenter(h1);
+  const centerX = (c0.x + c1.x) / 2;
+  const centerY = (c0.y + c1.y) / 2;
+  
+  // カメラの回転操作を実装
+  // 現在は何もしない（プレースホルダー）
+}
+
+function handleResetGesture(h0) {
+  // グーでリセット操作
+  const modeSwitchDelay = 1000; // 1秒間グーを維持でリセット
+  if (performance.now() - gestureState.modeStartTime > modeSwitchDelay) {
+    resetModelTransform();
+    gestureState.currentMode = 'none'; // リセット後は通常状態に
+  }
+}
+
+function handleSpecialGesture(h0, dt) {
+  // ピースサインでの特殊操作（例：品質切替、アニメーション等）
+  // 現在は何もしない（プレースホルダー）
+}
+
+function resetModelTransform() {
+  if (state.model && state.modelRoot) {
+    // モデルを初期位置にリセット
+    state.modelRoot.position.set(0, 0, 0);
+    state.modelRoot.rotation.set(0, 0, 0);
+    filt.scale = 1.0;
+    state.model.scale.setScalar(filt.scale);
+    
+    // フィルター状態もリセット
+    filt.pos.set(0, 0, 0);
+    filt.rotY = 0;
+    
+    // OneEuroFilterのリセット
+    onePosX = onePosY = onePosZ = oneYaw = null;
+    pinchScaleBaseline = null;
+    yawScalePrev = null;
+    
+    console.log('Model transform reset');
+    setStatus('モデルをリセットしました');
+  }
+}
+
+// レガシー互換のための状態更新
+function updateLegacyGrabState(h0, h1) {
+  const T_grab = state.gesture.T_grab, T_release = state.gesture.T_release;
+  
   if (h0) {
     const d0 = pinchDistance(h0);
     state._grabbing = state._grabbing ? (d0 < T_release) : (d0 < T_grab);
@@ -863,6 +1218,7 @@ function updateFromHands(result) {
   } else {
     state._grabbing = false;
   }
+  
   if (h1) {
     const d1 = pinchDistance(h1);
     state._grabbing2 = state._grabbing2 ? (d1 < T_release) : (d1 < T_grab);
@@ -870,80 +1226,22 @@ function updateFromHands(result) {
   } else {
     state._grabbing2 = false;
   }
-
-  // --- 操作 ---
-  if (h0) {
-    const c = handCenter(h0);
-    const yaw = handYaw(h0);
-    const dt = Math.max(1e-3, state.inferMs / 1000);
-
-    // --- 移動 (片手ピンチ時) ---
-    if (state._grabbing && !state._grabbing2) {
-      const pt = screenToWorld(c.x, c.y, 0);
-      if (pt) {
-        if (state.gesture.filter === 'oneeuro') {
-          onePosX ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-          onePosY ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-          onePosZ ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-          const x = onePosX.filter(pt.x, dt), y = onePosY.filter(pt.y, dt), z = onePosZ.filter(pt.z, dt);
-          filt.pos.set(x, y, z);
-        } else {
-          filt.pos.lerp(pt, state.gesture.posAlpha);
-        }
-        state.modelRoot.position.copy(filt.pos);
-      }
-    }
-    
-    // --- 回転 (片手ピンチ時) ---
-    if (state._grabbing && isFinite(yaw)) {
-      if (state.gesture.filter === 'oneeuro') {
-        oneYaw ||= new OneEuroFilter(state.gesture.minCutoff, state.gesture.beta, state.gesture.dCutoff);
-        const y = oneYaw.filter(yaw, dt);
-        filt.rotY = y;
-      } else {
-        if (yawPrev == null) yawPrev = yaw;
-        filt.rotY = lerpAngle(filt.rotY, yaw, state.gesture.rotAlpha);
-      }
-      state.modelRoot.rotation.y = filt.rotY;
-    }
-  } else {
-    yawPrev = null;
-  }
-
-  // --- スケール調整（非掴み時: 手首の水平角の変化量→スケール） ---
-  if (!state._grabbing && h0 && state.model) {
-    const yaw = handYaw(h0);
-    // ベースライン初期化
-    if (yawScalePrev == null || !isFinite(yawScalePrev)) yawScalePrev = yaw;
-    let dYaw = yaw - yawScalePrev;
-    // [-π, π]へ正規化
-    if (dYaw > Math.PI) dYaw -= 2 * Math.PI;
-    if (dYaw < -Math.PI) dYaw += 2 * Math.PI;
-    // 乗算型スケール更新
-    const targetScale = Math.max(0.2, Math.min(5.0, filt.scale * (1 + state.gesture.scaleGain * dYaw)));
-    filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha;
-    state.model.scale.setScalar(filt.scale);
-    // 次回の基準角を更新
-    yawScalePrev = yaw;
-    // 他の基準はリセット
-    pinchBaseline = null;
-  } else {
-    // 掴み中/手なし: スケール基準をリセット
-    pinchBaseline = null;
-    yawScalePrev = null;
-  }
 }
 
 const _raycaster = new THREE.Raycaster();
 function screenToWorld(nx, ny, zPlane = 0) {
   // nx, ny: 0..1（左上原点）→ NDCへ
+  // 手の座標は既にhandCenter()で反転済みなので、そのまま使用
   const x = nx * 2 - 1;
   const y = ny * -2 + 1;
   _raycaster.setFromCamera({ x, y }, state.camera);
+  
+  // より精密な平面との交差計算
   const planeNormal = new THREE.Vector3(0, 0, 1);
   const plane = new THREE.Plane(planeNormal, -zPlane);
   const pt = new THREE.Vector3();
   const hit = _raycaster.ray.intersectPlane(plane, pt);
+  
   return hit ? pt : null;
 }
 // --- XR層（A: WebXR Hit Test） ---
@@ -1064,8 +1362,92 @@ function createReticle() {
   mesh.rotation.x = -Math.PI / 2; mesh.visible = false; state.reticle = mesh; state.scene.add(mesh);
 }
 
+// 基本的なジェスチャー検出関数
 function pinchDistance(h) { const a = h[4], b = h[8]; return Math.hypot(a.x - b.x, a.y - b.y); }
-function handCenter(h) { const cx = (h[0].x + h[5].x + h[17].x) / 3; const cy = (h[0].y + h[5].y + h[17].y) / 3; return { x: cx, y: cy }; }
+function handCenter(h) { 
+  const cx = (h[0].x + h[5].x + h[17].x) / 3; 
+  const cy = (h[0].y + h[5].y + h[17].y) / 3; 
+  // カメラが左右反転されているので、手の座標も反転する
+  return { x: 1.0 - cx, y: cy }; 
+}
 function handYaw(h) { const a = h[0], b = h[9]; const vx = b.x - a.x, vy = b.y - a.y; return Math.atan2(-vx, -vy); }
 function handRoll(h) { const p1 = h[5], p2 = h[17]; const vx = p2.x - p1.x, vy = p2.y - p1.y; return Math.atan2(vy, vx); }
 function lerpAngle(a, b, t) { let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI; return a + d * t; }
+
+// 新しいジェスチャー検出関数
+function isPointingGesture(h) {
+  // 人差し指を立てて他の指を曲げているかチェック
+  const thumb = h[4], index = h[8], middle = h[12], ring = h[16], pinky = h[20];
+  const wrist = h[0];
+  
+  // 座標は既に正規化されているので距離計算はそのまま使用
+  // 人差し指が伸びているか（手首から遠い）
+  const indexExtended = Math.hypot(index.x - wrist.x, index.y - wrist.y) > 0.15;
+  // 中指、薬指、小指が曲がっているか（手首に近い）
+  const middleBent = Math.hypot(middle.x - wrist.x, middle.y - wrist.y) < 0.12;
+  const ringBent = Math.hypot(ring.x - wrist.x, ring.y - wrist.y) < 0.10;
+  const pinkyBent = Math.hypot(pinky.x - wrist.x, pinky.y - wrist.y) < 0.08;
+  
+  return indexExtended && middleBent && ringBent && pinkyBent;
+}
+
+function isOpenPalmGesture(h) {
+  // 手のひらを開いているかチェック（全ての指が広がっている）
+  const fingers = [h[4], h[8], h[12], h[16], h[20]]; // 各指の先端
+  const wrist = h[0];
+  
+  // 全ての指が手首から十分離れているか
+  return fingers.every(finger => 
+    Math.hypot(finger.x - wrist.x, finger.y - wrist.y) > 0.12
+  );
+}
+
+function isFistGesture(h) {
+  // 握りこぶしかチェック（全ての指が曲がっている）
+  const fingers = [h[4], h[8], h[12], h[16], h[20]];
+  const wrist = h[0];
+  
+  // 全ての指が手首に近いか
+  return fingers.every(finger => 
+    Math.hypot(finger.x - wrist.x, finger.y - wrist.y) < 0.10
+  );
+}
+
+function isPeaceSignGesture(h) {
+  // ピースサイン（人差し指と中指を立てる）
+  const index = h[8], middle = h[12], ring = h[16], pinky = h[20];
+  const wrist = h[0];
+  
+  const indexExtended = Math.hypot(index.x - wrist.x, index.y - wrist.y) > 0.14;
+  const middleExtended = Math.hypot(middle.x - wrist.x, middle.y - wrist.y) > 0.14;
+  const ringBent = Math.hypot(ring.x - wrist.x, ring.y - wrist.y) < 0.10;
+  const pinkyBent = Math.hypot(pinky.x - wrist.x, pinky.y - wrist.y) < 0.08;
+  
+  return indexExtended && middleExtended && ringBent && pinkyBent;
+}
+
+function getHandDistance(h1, h2) {
+  // 両手の距離を計算
+  const c1 = handCenter(h1);
+  const c2 = handCenter(h2);
+  return Math.hypot(c1.x - c2.x, c1.y - c2.y);
+}
+
+function getPinchCenter(h) {
+  // ピンチしている指先の中心点を計算（親指と人差し指）
+  const thumb = h[4]; // 親指の先端
+  const index = h[8]; // 人差し指の先端
+  const cx = (thumb.x + index.x) / 2;
+  const cy = (thumb.y + index.y) / 2;
+  // カメラが左右反転されているので、X座標も反転
+  return { x: 1.0 - cx, y: cy };
+}
+
+function getImprovedHandCenter(h) {
+  // より正確な手の中心を計算（手首、中手骨基部を重視）
+  const wrist = h[0];
+  const middleBase = h[9]; // 中指の付け根
+  const cx = (wrist.x * 0.3 + middleBase.x * 0.7); // 中指付け根を重視
+  const cy = (wrist.y * 0.3 + middleBase.y * 0.7);
+  return { x: 1.0 - cx, y: cy };
+}
