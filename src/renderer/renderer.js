@@ -1165,7 +1165,10 @@ const gestureState = {
   grabWorldPos: new THREE.Vector3(0, 0, 0), // 掴み開始時のワールド座標
   hasValidGrab: false, // 有効な掴み位置が設定されているか
   grabStartModelPos: new THREE.Vector3(0, 0, 0), // 掴み開始時のモデル位置
-  handToModelOffset: new THREE.Vector3(0, 0, 0) // 手からモデル位置への固定オフセット
+  handToModelOffset: new THREE.Vector3(0, 0, 0), // 手からモデル位置への固定オフセット
+  // [追加] レイキャストで当たった対象ノードと、そのローカル座標（スケール変化・階層変換に追従するため）
+  grabObject: null,
+  grabLocalOnObject: null
 };
 
 function updateFromHands(result) {
@@ -1331,13 +1334,20 @@ function handleMoveGesture(h0, dt) {
     if (gestureState.hasValidGrab) {
       // レイキャスト成功時：手の位置 + 掴み開始時のオフセット
       const targetGrabPoint = filt.pos.clone().add(gestureState.handToModelOffset);
-      
+
+      // 掴み点（現在のスケール・階層を反映したワールド座標）を算出
+      let currentGrabWorld = null;
+      if (gestureState.grabObject && gestureState.grabLocalOnObject) {
+        currentGrabWorld = gestureState.grabObject.localToWorld(gestureState.grabLocalOnObject.clone());
+      } else {
+        // フォールバック：modelRoot座標で保持していた掴み点を使用
+        const grabPointWorld = gestureState.grabOffset.clone();
+        state.modelRoot.localToWorld(grabPointWorld);
+        currentGrabWorld = grabPointWorld;
+      }
+
       // 掴み点からモデル中心位置を逆算
-      const grabPointLocal = gestureState.grabOffset.clone();
-      const grabPointWorld = grabPointLocal.clone();
-      state.modelRoot.localToWorld(grabPointWorld);
-      
-      const offsetFromCenter = grabPointWorld.clone().sub(state.modelRoot.position);
+      const offsetFromCenter = currentGrabWorld.clone().sub(state.modelRoot.position);
       const targetModelPos = targetGrabPoint.clone().sub(offsetFromCenter);
       
       state.modelRoot.position.copy(targetModelPos);
@@ -1552,6 +1562,14 @@ function calculateGrabOffset(handScreenPos) {
     
     // 手の位置から実際の当たり点（ワールド座標）へのオフセットを記録
     gestureState.handToModelOffset.copy(rayHit.point).sub(handWorldPos);
+    // [追加] 掴んだ対象ノードと、そのノードローカルでの掴み点を記録
+    try {
+      gestureState.grabObject = rayHit.object || null;
+      gestureState.grabLocalOnObject = gestureState.grabObject ? gestureState.grabObject.worldToLocal(rayHit.point.clone()) : null;
+    } catch {
+      gestureState.grabObject = null;
+      gestureState.grabLocalOnObject = null;
+    }
     
     console.log(`Raycast grab: local=(${rayHit.localPoint.x.toFixed(3)},${rayHit.localPoint.y.toFixed(3)},${rayHit.localPoint.z.toFixed(3)}) offset=(${gestureState.handToModelOffset.x.toFixed(3)},${gestureState.handToModelOffset.y.toFixed(3)},${gestureState.handToModelOffset.z.toFixed(3)})`);
   } else {
@@ -1561,6 +1579,8 @@ function calculateGrabOffset(handScreenPos) {
     
     // 手の位置からモデル中心へのオフセットを記録
     gestureState.handToModelOffset.copy(state.modelRoot.position).sub(handWorldPos);
+    gestureState.grabObject = null;
+    gestureState.grabLocalOnObject = null;
     
     console.log(`Fallback grab: hand=(${handWorldPos.x.toFixed(3)},${handWorldPos.y.toFixed(3)},${handWorldPos.z.toFixed(3)}) offset=(${gestureState.handToModelOffset.x.toFixed(3)},${gestureState.handToModelOffset.y.toFixed(3)},${gestureState.handToModelOffset.z.toFixed(3)})`);
   }
