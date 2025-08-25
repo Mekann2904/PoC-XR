@@ -123,14 +123,35 @@ function hudRender() {
     'special': '特殊操作'
   };
   
-  // スケール情報を追加
+  // スケール情報を追加（常に表示、より詳細に）
   const currentScale = state.model ? (state.model.scale?.x || 1) : 1;
-  const scaleInfo = gestureMode === 'move' && state._grabbing ? 
-    `scale: ${currentScale.toFixed(2)}x` : '';
+  const scaleInfo = state.model ? 
+    `scale: ${currentScale.toFixed(3)}x (${(currentScale * 100).toFixed(1)}%)` : '';
+  
+  // 手の距離情報を追加
+  let distanceInfo = '';
+  if (gestureMode === 'move' && state._grabbing && state.lastHands > 0) {
+    // 最後に検出された手の距離情報を表示
+    if (state._currentHandDistance) {
+      distanceInfo = `distance: ${(state._currentHandDistance * 100).toFixed(1)}cm`;
+    }
+  }
+  
+  // 掴み情報を追加
+  let grabInfo = '';
+  if (gestureMode === 'move' && state._grabbing) {
+    if (gestureState.hasValidGrab) {
+      const offset = gestureState.grabOffset;
+      grabInfo = `raycast grab: (${offset.x.toFixed(2)}, ${offset.y.toFixed(2)}, ${offset.z.toFixed(2)})`;
+    } else {
+      grabInfo = `direct grab mode`;
+    }
+  }
   
   // 操作説明を追加
   const instruction = gestureMode === 'move' && state._grabbing ? 
-    '手を前後に動かしてスケール調整' : '';
+    'モデルを掴んで移動、手の前後でスケール調整 (1%〜5000%)' : 
+    (gestureMode === 'scale' ? '両手ピンチでスケール調整 (1%〜5000%)' : '');
   
   els.hud.innerText = `fps: ${state.fps.toFixed(0)}
 ` +
@@ -144,6 +165,8 @@ function hudRender() {
 ` +
     (state._grabbing ? 'grab: ON' : 'grab: OFF') +
     (scaleInfo ? '\n' + scaleInfo : '') +
+    (distanceInfo ? '\n' + distanceInfo : '') +
+    (grabInfo ? '\n' + grabInfo : '') +
     (instruction ? '\n' + instruction : '');
   // XRヒント表示
   xrHint.hidden = !(state.xrSession && !state.xrPlaced);
@@ -1136,7 +1159,13 @@ const gestureState = {
   gestureConfidence: 0,
   // move中のスケール基準
   moveBaselineSpan: null,
-  moveBaselineScale: null
+  moveBaselineScale: null,
+  // 掴み位置の管理
+  grabOffset: new THREE.Vector3(0, 0, 0), // モデルローカル座標での掴み位置
+  grabWorldPos: new THREE.Vector3(0, 0, 0), // 掴み開始時のワールド座標
+  hasValidGrab: false, // 有効な掴み位置が設定されているか
+  grabStartModelPos: new THREE.Vector3(0, 0, 0), // 掴み開始時のモデル位置
+  handToModelOffset: new THREE.Vector3(0, 0, 0) // 手からモデル位置への固定オフセット
 };
 
 function updateFromHands(result) {
@@ -1212,10 +1241,11 @@ function determineGestureMode(h0, h1) {
 function executeGestureOperation(h0, h1, dt) {
   const mode = gestureState.currentMode;
   
-  // move以外のモードでは基準をクリア
+  // move以外のモードでは基準と掴み状態をクリア
   if (mode !== 'move') {
     gestureState.moveBaselineSpan = null;
     gestureState.moveBaselineScale = null;
+    gestureState.hasValidGrab = false;
   }
 
   switch (mode) {
@@ -1246,6 +1276,13 @@ function executeGestureOperation(h0, h1, dt) {
 function handleMoveGesture(h0, dt) {
   // ピンチの中心点を使用（より正確な操作点）
   const pinchCenter = getPinchCenter(h0);
+  
+  // 初回掴み時に掴み位置を計算
+  if (gestureState.moveBaselineSpan == null && state.model) {
+    calculateGrabOffset(pinchCenter);
+    console.log('Grab started at offset:', gestureState.grabOffset);
+  }
+  
   const pt = screenToWorld(pinchCenter.x, pinchCenter.y, 0);
   if (pt) {
     if (state.gesture.filter === 'oneeuro') {
@@ -1258,20 +1295,26 @@ function handleMoveGesture(h0, dt) {
       filt.pos.lerp(pt, state.gesture.posAlpha * 1.2); // 移動時は適度に敏感に
     }
     
-    // 手のひら幅変化でスケール連動（手前=拡大、奥=縮小）
-    const distance = handSpan(h0);
-    if (distance > 0) {
+    // カメラからの距離推定によるスケール調整
+    const handDistance = estimateHandDistance(h0);
+    state._currentHandDistance = handDistance; // HUD表示用に保存
+    
+    if (handDistance > 0) {
       if (gestureState.moveBaselineSpan == null) {
-        gestureState.moveBaselineSpan = distance;
+        gestureState.moveBaselineSpan = handDistance;
         gestureState.moveBaselineScale = state.model ? (state.model.scale?.x || filt.scale || 1) : (filt.scale || 1);
-        console.log('Move gesture started - baseline distance:', distance.toFixed(3), 'scale:', gestureState.moveBaselineScale.toFixed(3));
+        console.log('Move gesture started - baseline distance:', handDistance.toFixed(3), 'scale:', gestureState.moveBaselineScale.toFixed(3));
       } else {
-        const ratio = distance / (gestureState.moveBaselineSpan || distance);
-        const targetScale = Math.max(0.1, Math.min(10.0, (gestureState.moveBaselineScale || 1) * ratio));
+        // 距離が近い = スケール大、距離が遠い = スケール小
+        // 逆比例の関係でスケールを計算
+        const distanceRatio = gestureState.moveBaselineSpan / handDistance;
+        const targetScale = Math.max(0.01, Math.min(50.0, (gestureState.moveBaselineScale || 1) * distanceRatio));
         
         // スケール調整の感度を向上（より分かりやすい反応）
-        const scaleSensitivity = 0.5; // 感度調整（大きくするとより敏感）
-        filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha * scaleSensitivity;
+        const scaleSensitivity = 1.2; // カメラ距離による調整：より敏感に
+        // 現在のスケールによって感度を調整（小さい時ほど慎重に）
+        const adaptiveSensitivity = scaleSensitivity * Math.max(0.3, Math.min(1.0, filt.scale));
+        filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha * adaptiveSensitivity;
         
         if (state.model) {
           state.model.scale.setScalar(filt.scale);
@@ -1279,15 +1322,46 @@ function handleMoveGesture(h0, dt) {
         
         // デバッグ情報（開発時のみ）
         if (state.logLevel === 'debug') {
-          console.log(`Scale: distance=${distance.toFixed(3)}, ratio=${ratio.toFixed(3)}, target=${targetScale.toFixed(3)}, current=${filt.scale.toFixed(3)}`);
+          console.log(`Scale by distance: handDist=${handDistance.toFixed(3)}, ratio=${distanceRatio.toFixed(3)}, target=${targetScale.toFixed(3)}, current=${filt.scale.toFixed(3)}`);
         }
       }
     }
     
-    // 中心を掴む: モデルの中心が手先ptに来るようにYを補正
-    const currentScale = state.model ? (state.model.scale?.x || 1) : 1;
-    const centerYOffset = (state.modelCenterOffsetLocalY || 0) * currentScale;
-    state.modelRoot.position.set(filt.pos.x, filt.pos.y - centerYOffset, filt.pos.z);
+    // より確実な掴み位置計算：固定オフセット方式
+    if (gestureState.hasValidGrab) {
+      // レイキャスト成功時：手の位置 + 掴み開始時のオフセット
+      const targetGrabPoint = filt.pos.clone().add(gestureState.handToModelOffset);
+      
+      // 掴み点からモデル中心位置を逆算
+      const grabPointLocal = gestureState.grabOffset.clone();
+      const grabPointWorld = grabPointLocal.clone();
+      state.modelRoot.localToWorld(grabPointWorld);
+      
+      const offsetFromCenter = grabPointWorld.clone().sub(state.modelRoot.position);
+      const targetModelPos = targetGrabPoint.clone().sub(offsetFromCenter);
+      
+      state.modelRoot.position.copy(targetModelPos);
+      
+      // デバッグ情報（まれに表示）
+      if (Math.random() < 0.03) {
+        console.log(`[DEBUG] Precise grab:`);
+        console.log(`  Hand: (${filt.pos.x.toFixed(3)}, ${filt.pos.y.toFixed(3)}, ${filt.pos.z.toFixed(3)})`);
+        console.log(`  Target grab: (${targetGrabPoint.x.toFixed(3)}, ${targetGrabPoint.y.toFixed(3)}, ${targetGrabPoint.z.toFixed(3)})`);
+        console.log(`  Model: (${targetModelPos.x.toFixed(3)}, ${targetModelPos.y.toFixed(3)}, ${targetModelPos.z.toFixed(3)})`);
+      }
+      
+    } else {
+      // フォールバック：シンプルなオフセット追従
+      const targetModelPos = filt.pos.clone().add(gestureState.handToModelOffset);
+      state.modelRoot.position.copy(targetModelPos);
+      
+      // デバッグ情報（まれに表示）
+      if (Math.random() < 0.03) {
+        console.log(`[DEBUG] Simple grab:`);
+        console.log(`  Hand: (${filt.pos.x.toFixed(3)}, ${filt.pos.y.toFixed(3)}, ${filt.pos.z.toFixed(3)})`);
+        console.log(`  Model: (${targetModelPos.x.toFixed(3)}, ${targetModelPos.y.toFixed(3)}, ${targetModelPos.z.toFixed(3)})`);
+      }
+    }
   }
 }
 
@@ -1320,10 +1394,12 @@ function handleScaleGesture(h0, h1, dt) {
   }
   
   const scaleRatio = distance / pinchScaleBaseline;
-  const targetScale = Math.max(0.1, Math.min(10.0, filt.scale * scaleRatio));
+  const targetScale = Math.max(0.01, Math.min(50.0, filt.scale * scaleRatio));
   
-  // スケール変更は滑らかに
-  filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha * 0.3;
+  // スケール変更は滑らかに（感度向上）
+  const twoHandSensitivity = 0.6; // 両手操作は片手より安定
+  const adaptiveSensitivity = twoHandSensitivity * Math.max(0.3, Math.min(1.0, filt.scale));
+  filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha * adaptiveSensitivity;
   if (state.model) {
     state.model.scale.setScalar(filt.scale);
   }
@@ -1373,7 +1449,16 @@ function resetModelTransform() {
     pinchScaleBaseline = null;
     yawScalePrev = null;
     
-    console.log('Model transform reset');
+    // 掴み状態もリセット
+    gestureState.grabOffset.set(0, 0, 0);
+    gestureState.grabWorldPos.set(0, 0, 0);
+    gestureState.hasValidGrab = false;
+    gestureState.grabStartModelPos.set(0, 0, 0);
+    gestureState.handToModelOffset.set(0, 0, 0);
+    gestureState.moveBaselineSpan = null;
+    gestureState.moveBaselineScale = null;
+    
+    console.log('Model transform and grab state reset');
     setStatus('モデルをリセットしました');
   }
 }
@@ -1414,6 +1499,75 @@ function screenToWorld(nx, ny, zPlane = 0) {
   const hit = _raycaster.ray.intersectPlane(plane, pt);
   
   return hit ? pt : null;
+}
+
+function raycastToModel(nx, ny) {
+  // 手の位置からモデルへのレイキャスト
+  if (!state.model || !state.modelRoot) return null;
+  
+  const x = nx * 2 - 1;
+  const y = ny * -2 + 1;
+  _raycaster.setFromCamera({ x, y }, state.camera);
+  
+  // レイキャスターの設定を調整（より遠くまで、より精密に）
+  _raycaster.near = 0.1;
+  _raycaster.far = 100;
+  
+  // モデル全体（modelRoot配下）との交差判定
+  const intersects = _raycaster.intersectObject(state.modelRoot, true);
+  
+  if (intersects.length > 0) {
+    const hit = intersects[0];
+    // 交差点をモデルローカル座標に変換
+    const localPoint = hit.point.clone();
+    state.modelRoot.worldToLocal(localPoint);
+    
+    return {
+      point: hit.point, // ワールド座標での交差点
+      localPoint: localPoint, // モデルローカル座標
+      face: hit.face,
+      distance: hit.distance,
+      object: hit.object
+    };
+  }
+  return null;
+}
+
+function calculateGrabOffset(handScreenPos) {
+  // 手の現在の世界座標を取得
+  const handWorldPos = screenToWorld(handScreenPos.x, handScreenPos.y, 0);
+  if (!handWorldPos) {
+    console.log('Failed to convert hand screen position to world position');
+    gestureState.hasValidGrab = false;
+    return;
+  }
+  
+  // 手の位置からモデルに対するレイキャストを実行
+  const rayHit = raycastToModel(handScreenPos.x, handScreenPos.y);
+  
+  if (rayHit) {
+    // レイキャスト成功：実際の当たり点を使用
+    gestureState.grabOffset.copy(rayHit.localPoint);
+    gestureState.hasValidGrab = true;
+    
+    // 手の位置から実際の当たり点（ワールド座標）へのオフセットを記録
+    gestureState.handToModelOffset.copy(rayHit.point).sub(handWorldPos);
+    
+    console.log(`Raycast grab: local=(${rayHit.localPoint.x.toFixed(3)},${rayHit.localPoint.y.toFixed(3)},${rayHit.localPoint.z.toFixed(3)}) offset=(${gestureState.handToModelOffset.x.toFixed(3)},${gestureState.handToModelOffset.y.toFixed(3)},${gestureState.handToModelOffset.z.toFixed(3)})`);
+  } else {
+    // フォールバック：モデル中心を使用
+    gestureState.grabOffset.set(0, 0, 0);
+    gestureState.hasValidGrab = false;
+    
+    // 手の位置からモデル中心へのオフセットを記録
+    gestureState.handToModelOffset.copy(state.modelRoot.position).sub(handWorldPos);
+    
+    console.log(`Fallback grab: hand=(${handWorldPos.x.toFixed(3)},${handWorldPos.y.toFixed(3)},${handWorldPos.z.toFixed(3)}) offset=(${gestureState.handToModelOffset.x.toFixed(3)},${gestureState.handToModelOffset.y.toFixed(3)},${gestureState.handToModelOffset.z.toFixed(3)})`);
+  }
+  
+  // 掴み開始時の位置を記録
+  gestureState.grabWorldPos.copy(handWorldPos);
+  gestureState.grabStartModelPos.copy(state.modelRoot.position);
 }
 // --- XR層（A: WebXR Hit Test） ---
 state.xrSession = null;
@@ -1588,4 +1742,58 @@ function getImprovedHandCenter(h) {
   const cx = (wrist.x * 0.3 + middleBase.x * 0.7); // 中指付け根を重視
   const cy = (wrist.y * 0.3 + middleBase.y * 0.7);
   return { x: 1.0 - cx, y: cy };
+}
+
+function estimateHandDistance(h) {
+  // 手のひら幅からカメラ距離を推定
+  // 典型的な手のひら幅は約8-10cm、画面上での手のひら幅から距離を逆算
+  if (!h) return 0;
+  
+  const handWidth = handSpan(h); // 手のひら幅（正規化座標）
+  if (handWidth <= 0) return 0;
+  
+  // 経験的な定数：実際の手のひら幅（メートル）と画面上の幅の関係
+  const REAL_HAND_WIDTH = 0.09; // 平均的な手のひら幅 9cm
+  const CAMERA_FOV_FACTOR = 0.8; // カメラの視野角による補正係数（調整済み）
+  
+  // カメラからの推定距離（単位：メートル）
+  // distance = (real_width * fov_factor) / screen_width
+  const estimatedDistance = (REAL_HAND_WIDTH * CAMERA_FOV_FACTOR) / handWidth;
+  
+  // 実用的な範囲に制限（15cm〜3m）より広い範囲に調整
+  return Math.max(0.15, Math.min(3.0, estimatedDistance));
+}
+
+function getHandDepthIndicator(h) {
+  // 手の奥行きを示すより詳細な指標を計算
+  // 指の相対位置や手首の角度なども考慮
+  if (!h) return { distance: 0, confidence: 0 };
+  
+  const handWidth = handSpan(h);
+  const estimatedDist = estimateHandDistance(h);
+  
+  // 手のひらの開き具合でより正確な距離推定
+  const fingers = [h[4], h[8], h[12], h[16], h[20]]; // 各指の先端
+  const palm = handCenter(h);
+  
+  let totalFingerDist = 0;
+  let validFingers = 0;
+  
+  for (const finger of fingers) {
+    if (finger) {
+      const dist = Math.hypot(finger.x - palm.x, finger.y - palm.y);
+      totalFingerDist += dist;
+      validFingers++;
+    }
+  }
+  
+  const avgFingerSpread = validFingers > 0 ? totalFingerDist / validFingers : 0;
+  const confidence = Math.min(1.0, avgFingerSpread * 5); // 指の広がりが大きいほど信頼度高
+  
+  return {
+    distance: estimatedDist,
+    confidence: confidence,
+    handWidth: handWidth,
+    fingerSpread: avgFingerSpread
+  };
 }
