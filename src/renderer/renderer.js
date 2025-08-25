@@ -805,7 +805,6 @@ async function loadPMX(pmxAbsPath) {
     setProgress(30, 'PMXパース中');
     setStatus('PMX読み込み中');
     
-    const pmxURL = URL.createObjectURL(new Blob([new Uint8Array(pmxBuf)], { type: 'application/octet-stream' }));
     let mesh;
     try {
       mesh = await new Promise((resolve, reject) => {
