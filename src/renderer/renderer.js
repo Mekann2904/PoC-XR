@@ -733,6 +733,8 @@ async function loadPMX(pmxAbsPath) {
       console.warn('No files found in base directory:', baseDir);
     }
 
+    // 旧キャッシュをクリアしてから事前キャッシュを実施
+    clearBlobCache();
     // テクスチャファイルの事前キャッシュ（上限を設定して過負荷を回避）
     const imageExt = ['png', 'jpg', 'jpeg', 'bmp', 'tga'];
     let imageFiles = allFiles.filter(p => {
@@ -793,14 +795,13 @@ async function loadPMX(pmxAbsPath) {
 
     const loader = new MMDLoader(manager);
 
-    // 既存のモデルとBlobキャッシュをクリーンアップ
+    // 既存のモデルをクリーンアップ
     if (state.model) {
       disposeModelResources(state.model);
       const parent = state.modelRoot || state.scene;
       parent.remove(state.model);
       state.model = null;
     }
-    clearBlobCache();
 
     setProgress(30, 'PMXパース中');
     setStatus('PMX読み込み中');
