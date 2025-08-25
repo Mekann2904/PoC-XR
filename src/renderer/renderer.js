@@ -69,6 +69,8 @@ const state = {
   stream: null
 };
 state.xrPlaced = false;
+// モデル中心（ローカル座標系）のYオフセット（= AABB高さの半分）。移動操作の基準に使用
+state.modelCenterOffsetLocalY = 0;
 
 // 推論用キャンバス（OffscreenCanvas優先）
 let inferCanvas = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(1, 1) : null;
@@ -893,6 +895,8 @@ function autoPlace(obj) {
   const scale = maxDimension > 0 ? targetScreenRatio / maxDimension : 1.0;
   obj.scale.setScalar(scale);
   filt.scale = scale; // スケール変更の基準値を設定
+  // モデル中心（ローカル）Yオフセットを保存（スケール1基準）。移動操作で中心を掴むために使う。
+  state.modelCenterOffsetLocalY = size.y / 2;
   
   // モデルルートを初期位置に配置（画面中央、地面に立つように）
   state.modelRoot.position.set(0, 0, 0);
@@ -1233,7 +1237,10 @@ function handleMoveGesture(h0, dt) {
     } else {
       filt.pos.lerp(pt, state.gesture.posAlpha * 1.2); // 移動時は適度に敏感に
     }
-    state.modelRoot.position.copy(filt.pos);
+    // 中心を掴む: モデルの中心が手先ptに来るようにYを補正
+    const currentScale = state.model ? (state.model.scale?.x || 1) : 1;
+    const centerYOffset = (state.modelCenterOffsetLocalY || 0) * currentScale;
+    state.modelRoot.position.set(filt.pos.x, filt.pos.y - centerYOffset, filt.pos.z);
   }
 }
 
