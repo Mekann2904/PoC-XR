@@ -123,6 +123,15 @@ function hudRender() {
     'special': '特殊操作'
   };
   
+  // スケール情報を追加
+  const currentScale = state.model ? (state.model.scale?.x || 1) : 1;
+  const scaleInfo = gestureMode === 'move' && state._grabbing ? 
+    `scale: ${currentScale.toFixed(2)}x` : '';
+  
+  // 操作説明を追加
+  const instruction = gestureMode === 'move' && state._grabbing ? 
+    '手を前後に動かしてスケール調整' : '';
+  
   els.hud.innerText = `fps: ${state.fps.toFixed(0)}
 ` +
     `infer: ${state.inferFps}fps (${state.inferMs.toFixed(1)}ms)
@@ -133,7 +142,9 @@ function hudRender() {
 ` +
     `gesture: ${modeDisplay[gestureMode] || gestureMode}
 ` +
-    (state._grabbing ? 'grab: ON' : 'grab: OFF');
+    (state._grabbing ? 'grab: ON' : 'grab: OFF') +
+    (scaleInfo ? '\n' + scaleInfo : '') +
+    (instruction ? '\n' + instruction : '');
   // XRヒント表示
   xrHint.hidden = !(state.xrSession && !state.xrPlaced);
   if (assetHint) assetHint.hidden = !state._needHandModel;
@@ -1122,7 +1133,10 @@ const gestureState = {
   lastMode: 'none',
   modeStartTime: 0,
   handsHistory: [],
-  gestureConfidence: 0
+  gestureConfidence: 0,
+  // move中のスケール基準
+  moveBaselineSpan: null,
+  moveBaselineScale: null
 };
 
 function updateFromHands(result) {
@@ -1198,6 +1212,12 @@ function determineGestureMode(h0, h1) {
 function executeGestureOperation(h0, h1, dt) {
   const mode = gestureState.currentMode;
   
+  // move以外のモードでは基準をクリア
+  if (mode !== 'move') {
+    gestureState.moveBaselineSpan = null;
+    gestureState.moveBaselineScale = null;
+  }
+
   switch (mode) {
     case 'move':
       handleMoveGesture(h0, dt);
@@ -1237,6 +1257,33 @@ function handleMoveGesture(h0, dt) {
     } else {
       filt.pos.lerp(pt, state.gesture.posAlpha * 1.2); // 移動時は適度に敏感に
     }
+    
+    // 手のひら幅変化でスケール連動（手前=拡大、奥=縮小）
+    const distance = handSpan(h0);
+    if (distance > 0) {
+      if (gestureState.moveBaselineSpan == null) {
+        gestureState.moveBaselineSpan = distance;
+        gestureState.moveBaselineScale = state.model ? (state.model.scale?.x || filt.scale || 1) : (filt.scale || 1);
+        console.log('Move gesture started - baseline distance:', distance.toFixed(3), 'scale:', gestureState.moveBaselineScale.toFixed(3));
+      } else {
+        const ratio = distance / (gestureState.moveBaselineSpan || distance);
+        const targetScale = Math.max(0.1, Math.min(10.0, (gestureState.moveBaselineScale || 1) * ratio));
+        
+        // スケール調整の感度を向上（より分かりやすい反応）
+        const scaleSensitivity = 0.5; // 感度調整（大きくするとより敏感）
+        filt.scale = filt.scale + (targetScale - filt.scale) * state.gesture.posAlpha * scaleSensitivity;
+        
+        if (state.model) {
+          state.model.scale.setScalar(filt.scale);
+        }
+        
+        // デバッグ情報（開発時のみ）
+        if (state.logLevel === 'debug') {
+          console.log(`Scale: distance=${distance.toFixed(3)}, ratio=${ratio.toFixed(3)}, target=${targetScale.toFixed(3)}, current=${filt.scale.toFixed(3)}`);
+        }
+      }
+    }
+    
     // 中心を掴む: モデルの中心が手先ptに来るようにYを補正
     const currentScale = state.model ? (state.model.scale?.x || 1) : 1;
     const centerYOffset = (state.modelCenterOffsetLocalY || 0) * currentScale;
@@ -1452,6 +1499,15 @@ function handCenter(h) {
   // カメラが左右反転されているので、手の座標も反転する
   return { x: 1.0 - cx, y: cy }; 
 }
+// 手のひら幅（5=人差し指付け根, 17=小指付け根）を手サイズとして利用
+function handSpan(h) {
+  if (!h) return 0;
+  const a = h[5], b = h[17];
+  if (!a || !b) return 0;
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// 片手の距離検出は handSpan() を使用
 function handYaw(h) { const a = h[0], b = h[9]; const vx = b.x - a.x, vy = b.y - a.y; return Math.atan2(-vx, -vy); }
 function handRoll(h) { const p1 = h[5], p2 = h[17]; const vx = p2.x - p1.x, vy = p2.y - p1.y; return Math.atan2(vy, vx); }
 function lerpAngle(a, b, t) { let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI; return a + d * t; }
