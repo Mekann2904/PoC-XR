@@ -38,7 +38,17 @@ const defaultGesture = {
   scaleGain: 0.5,
   minCutoff: 1.0,
   beta: 0.3,
-  dCutoff: 1.0
+  dCutoff: 1.0,
+  // 回転精密制御（グー）
+  yawDeadzoneDeg: 2.0,
+  rollDeadzoneDeg: 3.0,
+  axisHysteresisDeg: 10.0,
+  snapStepDeg: 15.0,
+  snapWindowDeg: 2.0,
+  gainLowDeg: 10.0,
+  gainHighDeg: 60.0,
+  gainLowMul: 0.6,
+  gainHighMul: 1.2
 };
 
 const state = {
@@ -71,6 +81,10 @@ const state = {
 state.xrPlaced = false;
 // モデル中心（ローカル座標系）のYオフセット（= AABB高さの半分）。移動操作の基準に使用
 state.modelCenterOffsetLocalY = 0;
+// 精密回転UI（軸リング）
+state.axisRings = null; // THREE.Group
+state.axisRingsVisible = false;
+state.axisRingsSelected = 'y'; // 'x' | 'y' | 'z'
 
 // 推論用キャンバス（OffscreenCanvas優先）
 let inferCanvas = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(1, 1) : null;
@@ -116,11 +130,10 @@ function hudRender() {
     'none': '待機中',
     'move': '移動中',
     'rotate': '回転中', 
+    'fist_rotation': 'グー回転中',
     'scale': 'スケール中',
     'camera': 'カメラ操作',
-    'reset': 'リセット待機',
-    'point': 'ポイント',
-    'special': '特殊操作'
+    'point': 'ポイント'
   };
   
   // スケール情報を追加（常に表示、より詳細に）
@@ -151,7 +164,8 @@ function hudRender() {
   // 操作説明を追加
   const instruction = gestureMode === 'move' && state._grabbing ? 
     'モデルを掴んで移動、手の前後でスケール調整 (1%〜5000%)' : 
-    (gestureMode === 'scale' ? '両手ピンチでスケール調整 (1%〜5000%)' : '');
+    (gestureMode === 'scale' ? '両手ピンチでスケール調整 (1%〜5000%)' : 
+    (gestureMode === 'fist_rotation' ? 'グー: 単一軸ロック回転（自動軸選択・スナップ）' : ''));
   
   els.hud.innerText = `fps: ${state.fps.toFixed(0)}
 ` +
@@ -1168,7 +1182,17 @@ const gestureState = {
   handToModelOffset: new THREE.Vector3(0, 0, 0), // 手からモデル位置への固定オフセット
   // [追加] レイキャストで当たった対象ノードと、そのローカル座標（スケール変化・階層変換に追従するため）
   grabObject: null,
-  grabLocalOnObject: null
+  grabLocalOnObject: null,
+  // 回転制御用
+  rotationBaseline: {
+    yaw: 0,      // 手のひらの向き基準値
+    roll: 0,     // 手首の回転基準値  
+    modelYaw: 0, // モデルの初期Y回転
+    modelRoll: 0 // モデルの初期Z回転
+  },
+  // 軸選択とヒステリシス
+  selectedAxis: null, // 'y' | 'z' | null
+  lastAxisSwitchAt: 0
 };
 
 function updateFromHands(result) {
@@ -1191,6 +1215,16 @@ function updateFromHands(result) {
     gestureState.currentMode = newMode;
     gestureState.modeStartTime = performance.now();
     console.log(`Gesture mode changed: ${gestureState.lastMode} -> ${gestureState.currentMode}`);
+    // 軸リングの表示切替と回転基準の初期化
+    if (gestureState.currentMode === 'fist_rotation') {
+      ensureAxisRings();
+      setAxisRingsVisible(true);
+      gestureState.selectedAxis = null;
+      highlightAxisRing('y');
+    } else {
+      setAxisRingsVisible(false);
+      gestureState.selectedAxis = null;
+    }
   }
 
   // 操作の実行
@@ -1219,22 +1253,25 @@ function determineGestureMode(h0, h1) {
     }
   }
   
-  // 片手の場合
+  // 片手の場合（優先度: グー > ピンチ > 指差し > パー）
   if (h0) {
     const isPinch = pinchDistance(h0) < state.gesture.T_grab;
     const isPointing = isPointingGesture(h0);
     const isOpenPalm = isOpenPalmGesture(h0);
     const isFist = isFistGesture(h0);
-    const isPeace = isPeaceSignGesture(h0);
-    
-    if (isPinch) {
+
+    if (Math.random() < 0.05) {
+      console.log(`[GESTURE DEBUG] pinch:${isPinch} pointing:${isPointing} palm:${isOpenPalm} fist:${isFist}`);
+    }
+
+    if (isFist) {
+      return 'fist_rotation'; // グー = グー回転（最優先）
+    } else if (isPinch) {
       return 'move'; // ピンチ = 移動
     } else if (isPointing) {
-      return 'point'; // 指差し = ポイント（将来的な機能用）
-    } else if (isFist) {
-      return 'reset'; // グー = リセット
-    } else if (isPeace) {
-      return 'special'; // ピース = 特殊操作
+      return 'point'; // 指差し
+    } else if (isOpenPalm) {
+      return 'camera'; // パー
     }
   }
   
@@ -1250,6 +1287,14 @@ function executeGestureOperation(h0, h1, dt) {
     gestureState.moveBaselineScale = null;
     gestureState.hasValidGrab = false;
   }
+  
+  // fist_rotation以外のモードでは回転基準をクリア
+  if (mode !== 'fist_rotation') {
+    gestureState.rotationBaseline.yaw = 0;
+    gestureState.rotationBaseline.roll = 0;
+    gestureState.rotationBaseline.modelYaw = 0;
+    gestureState.rotationBaseline.modelRoll = 0;
+  }
 
   switch (mode) {
     case 'move':
@@ -1258,17 +1303,17 @@ function executeGestureOperation(h0, h1, dt) {
     case 'rotate':
       handleRotateGesture(h0, h1, dt);
       break;
+    case 'fist_rotation':
+      handleFistRotationGesture(h0, dt);
+      break;
     case 'scale':
       handleScaleGesture(h0, h1, dt);
       break;
     case 'camera':
       handleCameraGesture(h0, h1, dt);
       break;
-    case 'reset':
-      handleResetGesture(h0);
-      break;
-    case 'special':
-      handleSpecialGesture(h0, dt);
+    case 'point':
+      // 指差しジェスチャー（将来的な機能用）
       break;
     default:
       // 何もしない
@@ -1392,6 +1437,101 @@ function handleRotateGesture(h0, h1, dt) {
   state.modelRoot.rotation.y = filt.rotY;
 }
 
+// グー回転ジェスチャーハンドラー
+function handleFistRotationGesture(h0, dt) {
+  if (!h0 || !state.modelRoot) return;
+
+  const handRotation = analyzeHandRotation(h0);
+  if (!handRotation) return;
+
+  // 初回実行時に基準値を設定
+  if (gestureState.rotationBaseline.yaw === 0 && gestureState.rotationBaseline.roll === 0) {
+    gestureState.rotationBaseline.yaw = handRotation.yawAngle;
+    gestureState.rotationBaseline.roll = handRotation.rollAngle;
+    gestureState.rotationBaseline.modelYaw = state.modelRoot.rotation.y;
+    gestureState.rotationBaseline.modelRoll = state.modelRoot.rotation.z;
+    // 軸リング初期表示
+    ensureAxisRings();
+    setAxisRingsVisible(true);
+    gestureState.selectedAxis = null;
+    return;
+  }
+
+  // 角度差（基準からの相対）
+  let yawDelta = handRotation.yawAngle - gestureState.rotationBaseline.yaw;   // Y軸: 手のひらを返す
+  let rollDelta = handRotation.rollAngle - gestureState.rotationBaseline.roll; // Z軸: 手首を回す
+
+  // デッドゾーン（度→ラジアン）
+  const yd = THREE.MathUtils.degToRad(state.gesture.yawDeadzoneDeg);
+  const zd = THREE.MathUtils.degToRad(state.gesture.rollDeadzoneDeg);
+  if (Math.abs(yawDelta) < yd) yawDelta = 0;
+  if (Math.abs(rollDelta) < zd) rollDelta = 0;
+
+  // 非線形ゲイン
+  function applyGain(rad) {
+    const a = Math.abs(THREE.MathUtils.radToDeg(rad));
+    const a1 = state.gesture.gainLowDeg;
+    const a2 = state.gesture.gainHighDeg;
+    const g1 = state.gesture.gainLowMul;
+    const g2 = state.gesture.gainHighMul;
+    let g = g2;
+    if (a <= a1) g = g1;
+    else if (a < a2) g = g1 + (g2 - g1) * ((a - a1) / (a2 - a1));
+    return Math.sign(rad) * THREE.MathUtils.degToRad(THREE.MathUtils.radToDeg(rad) * g);
+  }
+  const yawAdj = applyGain(yawDelta);
+  const rollAdj = applyGain(rollDelta);
+
+  // 軸自動ロック + ヒステリシス
+  const hyst = THREE.MathUtils.degToRad(state.gesture.axisHysteresisDeg);
+  if (!gestureState.selectedAxis) {
+    if (Math.abs(yawAdj) > Math.abs(rollAdj) + hyst && yawAdj !== 0) gestureState.selectedAxis = 'y';
+    else if (Math.abs(rollAdj) > Math.abs(yawAdj) + hyst && rollAdj !== 0) gestureState.selectedAxis = 'z';
+  } else {
+    if (gestureState.selectedAxis === 'y' && Math.abs(rollAdj) > Math.abs(yawAdj) + hyst) {
+      gestureState.selectedAxis = 'z';
+      gestureState.lastAxisSwitchAt = performance.now();
+    } else if (gestureState.selectedAxis === 'z' && Math.abs(yawAdj) > Math.abs(rollAdj) + hyst) {
+      gestureState.selectedAxis = 'y';
+      gestureState.lastAxisSwitchAt = performance.now();
+    }
+  }
+
+  // 表示のハイライト更新
+  ensureAxisRings();
+  setAxisRingsVisible(true);
+  highlightAxisRing(gestureState.selectedAxis || 'y');
+
+  // ターゲット角度を計算
+  let targetY = state.modelRoot.rotation.y;
+  let targetZ = state.modelRoot.rotation.z;
+  if (gestureState.selectedAxis === 'y' && yawAdj !== 0) {
+    targetY = gestureState.rotationBaseline.modelYaw + yawAdj;
+  } else if (gestureState.selectedAxis === 'z' && rollAdj !== 0) {
+    targetZ = gestureState.rotationBaseline.modelRoll + rollAdj;
+  }
+
+  // スナップ（15°グリッド、±窓）
+  function snap(rad) {
+    const step = state.gesture.snapStepDeg;
+    const win = state.gesture.snapWindowDeg;
+    const deg = THREE.MathUtils.radToDeg(rad);
+    const snapDeg = Math.round(deg / step) * step;
+    if (Math.abs(deg - snapDeg) <= win) return THREE.MathUtils.degToRad(snapDeg);
+    return rad;
+  }
+  targetY = snap(targetY);
+  targetZ = snap(targetZ);
+
+  // スムージング適用（角度補間）
+  const a = Math.max(0.05, Math.min(1.0, state.gesture.rotAlpha * 0.7));
+  const newY = lerpAngle(state.modelRoot.rotation.y, targetY, a);
+  const newZ = lerpAngle(state.modelRoot.rotation.z, targetZ, a);
+
+  state.modelRoot.rotation.y = newY;
+  state.modelRoot.rotation.z = newZ;
+}
+
 function handleScaleGesture(h0, h1, dt) {
   // 両手のピンチ中心間の距離からスケールを計算
   const c0 = getPinchCenter(h0);
@@ -1428,19 +1568,9 @@ function handleCameraGesture(h0, h1, dt) {
   // 現在は何もしない（プレースホルダー）
 }
 
-function handleResetGesture(h0) {
-  // グーでリセット操作
-  const modeSwitchDelay = 1000; // 1秒間グーを維持でリセット
-  if (performance.now() - gestureState.modeStartTime > modeSwitchDelay) {
-    resetModelTransform();
-    gestureState.currentMode = 'none'; // リセット後は通常状態に
-  }
-}
 
-function handleSpecialGesture(h0, dt) {
-  // ピースサインでの特殊操作（例：品質切替、アニメーション等）
-  // 現在は何もしない（プレースホルダー）
-}
+
+
 
 function resetModelTransform() {
   if (state.model && state.modelRoot) {
@@ -1467,6 +1597,13 @@ function resetModelTransform() {
     gestureState.handToModelOffset.set(0, 0, 0);
     gestureState.moveBaselineSpan = null;
     gestureState.moveBaselineScale = null;
+    // 回転基準もリセット
+    gestureState.rotationBaseline.yaw = 0;
+    gestureState.rotationBaseline.roll = 0;
+    gestureState.rotationBaseline.modelYaw = 0;
+    gestureState.rotationBaseline.modelRoll = 0;
+    gestureState.selectedAxis = null;
+    setAxisRingsVisible(false);
     
     console.log('Model transform and grab state reset');
     setStatus('モデルをリセットしました');
@@ -1665,6 +1802,66 @@ function createReticle() {
   mesh.rotation.x = -Math.PI / 2; mesh.visible = false; state.reticle = mesh; state.scene.add(mesh);
 }
 
+// 精密回転用の軸リングUI
+function ensureAxisRings() {
+  if (!state.model) return;
+  if (state.axisRings && state.axisRings.parent) return; // 既に作成済
+
+  const group = new THREE.Group();
+  group.name = 'axisRings';
+
+  // モデルのサイズから半径を推定
+  const box = new THREE.Box3().setFromObject(state.model);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const radius = Math.max(0.05, Math.max(size.x, size.y, size.z) * 0.55);
+
+  const segs = 64;
+  const tube = radius * 0.01; // 線幅は半径の1%
+  const mkRing = (color) => new THREE.Mesh(
+    new THREE.TorusGeometry(radius, tube, 8, segs),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.65, depthTest: false })
+  );
+
+  // Z面（XY平面）→ Z軸回転の可視リング（青）
+  const ringZ = mkRing(0x3b6cff); // 青
+  ringZ.name = 'ringZ';
+  // 既定のTorusはXY平面なのでそのまま
+
+  // Y面（XZ平面）→ Y軸回転の可視リング（緑）
+  const ringY = mkRing(0x22cc77); // 緑
+  ringY.name = 'ringY';
+  ringY.rotation.x = Math.PI / 2; // XZ平面へ
+
+  // X面（YZ平面）→ X軸回転の可視リング（赤）
+  const ringX = mkRing(0xff5555); // 赤
+  ringX.name = 'ringX';
+  ringX.rotation.y = Math.PI / 2; // YZ平面へ
+
+  group.add(ringX, ringY, ringZ);
+  group.visible = false;
+
+  // モデルに追従（スケール/回転）させたいのでmodelの子にする
+  state.model.add(group);
+  state.axisRings = group;
+}
+
+function setAxisRingsVisible(v) {
+  state.axisRingsVisible = !!v;
+  if (state.axisRings) state.axisRings.visible = !!v;
+}
+
+function highlightAxisRing(axis) {
+  state.axisRingsSelected = axis;
+  if (!state.axisRings) return;
+  const ringX = state.axisRings.getObjectByName('ringX');
+  const ringY = state.axisRings.getObjectByName('ringY');
+  const ringZ = state.axisRings.getObjectByName('ringZ');
+  const dim = 0.35, bright = 0.95;
+  if (ringX && ringX.material) ringX.material.opacity = (axis === 'x') ? bright : dim;
+  if (ringY && ringY.material) ringY.material.opacity = (axis === 'y') ? bright : dim;
+  if (ringZ && ringZ.material) ringZ.material.opacity = (axis === 'z') ? bright : dim;
+}
+
 // 基本的なジェスチャー検出関数
 function pinchDistance(h) { const a = h[4], b = h[8]; return Math.hypot(a.x - b.x, a.y - b.y); }
 function handCenter(h) { 
@@ -1715,28 +1912,41 @@ function isOpenPalmGesture(h) {
 }
 
 function isFistGesture(h) {
-  // 握りこぶしかチェック（全ての指が曲がっている）
-  const fingers = [h[4], h[8], h[12], h[16], h[20]];
+  // 握りこぶしかチェック（各指のカール度合いで判定）
+  const span = handSpan(h);
+  if (!h || span <= 1e-6) return false;
+
+  // 指先と付け根の距離（正規化）
+  const pairs = [
+    [8, 5],   // index tip - MCP
+    [12, 9],  // middle tip - MCP
+    [16, 13], // ring tip - MCP
+    [20, 17]  // pinky tip - MCP
+  ];
+  const curls = pairs.map(([tip, base]) => {
+    const t = h[tip], b = h[base];
+    return Math.hypot((t.x - b.x), (t.y - b.y)) / span;
+  });
+  const avgCurl = curls.reduce((a, b) => a + b, 0) / curls.length;
+
+  // 親指は手首に近いほどOK（ただし厳密ではない）
   const wrist = h[0];
-  
-  // 全ての指が手首に近いか
-  return fingers.every(finger => 
-    Math.hypot(finger.x - wrist.x, finger.y - wrist.y) < 0.10
-  );
+  const thumb = h[4];
+  const thumbClose = Math.hypot(thumb.x - wrist.x, thumb.y - wrist.y) / span < 0.9;
+
+  // しきい値（経験則）
+  const allCurled = curls.every(d => d < 0.55);
+  const overallCurled = avgCurl < 0.45;
+
+  const ok = (allCurled && overallCurled) || (overallCurled && thumbClose);
+
+  if (Math.random() < 0.05) {
+    console.log(`[FIST DEBUG] curls=${curls.map(v => v.toFixed(2)).join(',')} avg=${avgCurl.toFixed(2)} span=${span.toFixed(3)} -> ${ok}`);
+  }
+  return ok;
 }
 
-function isPeaceSignGesture(h) {
-  // ピースサイン（人差し指と中指を立てる）
-  const index = h[8], middle = h[12], ring = h[16], pinky = h[20];
-  const wrist = h[0];
-  
-  const indexExtended = Math.hypot(index.x - wrist.x, index.y - wrist.y) > 0.14;
-  const middleExtended = Math.hypot(middle.x - wrist.x, middle.y - wrist.y) > 0.14;
-  const ringBent = Math.hypot(ring.x - wrist.x, ring.y - wrist.y) < 0.10;
-  const pinkyBent = Math.hypot(pinky.x - wrist.x, pinky.y - wrist.y) < 0.08;
-  
-  return indexExtended && middleExtended && ringBent && pinkyBent;
-}
+
 
 function getHandDistance(h1, h2) {
   // 両手の距離を計算
@@ -1782,6 +1992,76 @@ function estimateHandDistance(h) {
   
   // 実用的な範囲に制限（15cm〜3m）より広い範囲に調整
   return Math.max(0.15, Math.min(3.0, estimatedDistance));
+}
+
+// 手の向きと回転を分析する関数
+function analyzeHandRotation(h) {
+  if (!h) return null;
+  
+  // 手首（0）、中指の付け根（9）、中指の先（12）を使用
+  const wrist = h[0];
+  const middleBase = h[9];
+  const middleTip = h[12];
+  
+  // 親指の付け根（1）と小指の付け根（17）を使用して手のひらの向きを検出
+  const thumbBase = h[1];
+  const pinkyBase = h[17];
+  
+  // 手のひらの向き（パーム・ノーマル）を計算
+  // 手首から中指付け根へのベクトル
+  const handDirection = {
+    x: middleBase.x - wrist.x,
+    y: middleBase.y - wrist.y,
+    z: (middleBase.z || 0) - (wrist.z || 0)
+  };
+  
+  // 親指から小指へのベクトル（手のひらの幅方向）
+  const palmWidth = {
+    x: pinkyBase.x - thumbBase.x,
+    y: pinkyBase.y - thumbBase.y,
+    z: (pinkyBase.z || 0) - (thumbBase.z || 0)
+  };
+  
+  // 手のひらの法線ベクトル（外積で計算）
+  const palmNormal = {
+    x: handDirection.y * palmWidth.z - handDirection.z * palmWidth.y,
+    y: handDirection.z * palmWidth.x - handDirection.x * palmWidth.z,
+    z: handDirection.x * palmWidth.y - handDirection.y * palmWidth.x
+  };
+  
+  // 正規化
+  const normalLength = Math.sqrt(palmNormal.x * palmNormal.x + palmNormal.y * palmNormal.y + palmNormal.z * palmNormal.z);
+  if (normalLength > 0) {
+    palmNormal.x /= normalLength;
+    palmNormal.y /= normalLength;
+    palmNormal.z /= normalLength;
+  }
+  
+  // 手首の回転角度（ロール）を計算
+  // 親指と小指のY座標の差から算出
+  const rollAngle = Math.atan2(palmWidth.y, Math.abs(palmWidth.x));
+  
+  // 手のひらの向き角度（ヨー）を計算
+  // 手のひらの法線ベクトルから算出
+  const yawAngle = Math.atan2(palmNormal.x, palmNormal.z);
+  
+  // 手の上下の向き（ピッチ）を計算
+  const pitchAngle = Math.atan2(-handDirection.y, Math.sqrt(handDirection.x * handDirection.x + handDirection.z * handDirection.z));
+  
+  const result = {
+    palmNormal: palmNormal,
+    rollAngle: rollAngle,    // 手首の回転（Z軸回り）
+    yawAngle: yawAngle,      // 手のひらの向き（Y軸回り）
+    pitchAngle: pitchAngle,  // 手の上下（X軸回り）
+    handDirection: handDirection
+  };
+  
+  // デバッグ情報（まれに）
+  if (Math.random() < 0.02) {
+    console.log(`[HAND ROTATION] yaw:${yawAngle.toFixed(3)} roll:${rollAngle.toFixed(3)} pitch:${pitchAngle.toFixed(3)}`);
+  }
+  
+  return result;
 }
 
 function getHandDepthIndicator(h) {
